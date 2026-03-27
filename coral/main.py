@@ -25,7 +25,7 @@ def create(path: Path = typer.Argument(Path('.'))):
         )
     ):
         typer.secho(f"Path {path} must be an empty folder.", fg='red')
-        typer.Exit(1)
+        raise typer.Exit(1)
     
     if not path.exists():
         typer.secho(f"[+] Creating directory {path}...", fg='green')
@@ -34,12 +34,12 @@ def create(path: Path = typer.Argument(Path('.'))):
     name = path.name
 
     base_config = Config(
-        DISCORD_TOKEN  = None,
+        DISCORD_TOKEN  = "Paste your Discord token here.",
         DISCORD_PREFIX = '--',
         DISCORD_ALLOWED_USER_OR_ROLE_IDS = None,
 
         AI_MODEL_NAME = 'google-gla:gemini-flash-latest',
-        AI_API_KEY = None,
+        AI_API_KEY = "Put your API key here.",
         AI_OPENAI_COMPATIBLE_BASE_URL = None,
         AI_EXTRA_CONTEXT_PATH = 'config.md.j2',
 
@@ -50,6 +50,37 @@ def create(path: Path = typer.Argument(Path('.'))):
     (path / 'config.md.j2').write_text(prompts.DEFAULT_EXTRA_PROMPT.render(path=path))
 
     typer.secho(f"[+] Success! All set up! Now go and customize your bot!", fg='green')
+
+@app.command()
+def clear(path: Path = typer.Argument(Path('.'))):
+    os.chdir(path.resolve())
+
+    config = load_config()
+
+    from urllib.parse import urlparse, unquote
+
+    parsed = urlparse(config.DB_PATH)
+
+    if parsed.scheme != 'sqlite':
+        typer.secho('The database is not a SQLite .db file. Coral cannot find the database path to clear.', fg='red')
+        raise typer.Exit(1)
+
+    db_path: Path
+
+    if parsed.path.startswith('/'):
+        db_path = Path(unquote(parsed.path))
+    else:
+        db_path = Path(unquote(parsed.path.lstrip('/')))
+
+    if not db_path: return
+
+    confirm = input(f"Clear memory file at {db_path}? [y/N]: ").strip().lower()[0] == 'y'
+
+    if not confirm: return
+
+    db_path.unlink()
+
+    typer.secho("Memory cleared successfully.", fg='green')
 
 @app.command()
 def run(path: Path = typer.Argument(Path('.'))):
@@ -70,6 +101,11 @@ def run(path: Path = typer.Argument(Path('.'))):
         )
     else:
         model = config.AI_MODEL_NAME
+        # google-gla:gemini-flash-latest -> GOOGLE_API_KEY
+        # xai:grok-4-1-fast-non-reasoning -> XAI_API_KEY
+        # openai:gpt-5.2 -> OPENAI_API_KEY
+
+        os.environ[model.split(':')[0].split('-')[0].upper() + '_API_KEY'] = config.AI_API_KEY
 
     engine = init_db(config.DB_PATH)
 

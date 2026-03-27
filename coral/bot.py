@@ -58,9 +58,8 @@ class CoralBot(discord.Client):
             
             try:
                 result = await self.agent.run(
-                    user_prompt     = f"{message.author.display_name} (ID: {message.author.id}): " + utils.clean(message).removeprefix(self.config.DISCORD_PREFIX),
-                    instructions    = prompts.SYSTEM_PROMPT.render(client=self, config=self.config),
-                    deps            = Deps(message=message, client=self),
+                    user_prompt     = utils.clean(message).removeprefix(self.config.DISCORD_PREFIX),
+                    deps            = Deps(message=message, client=self, config=self.config),
                     model           = self.model,
                     message_history = history,
                 )
@@ -85,9 +84,10 @@ A **critical exception** occured in my main thread.
 
 **Error Details:**
 ```
-{traceback.format_exc(limit=5)}
+{traceback.format_exc(limit=2)}
 ```
                 """
+                traceback.print_exc()
             finally:
                 info = []
 
@@ -126,7 +126,7 @@ A **critical exception** occured in my main thread.
 
 **Error Details:**
 ```
-{traceback.format_exc(limit=5).replace(os.path.dirname(__file__), '/')}
+{traceback.format_exc(limit=2).replace(os.path.dirname(__file__), '/')}
 ```
         """
 

@@ -10,16 +10,43 @@ from contextlib import redirect_stdout, redirect_stderr
 from io import StringIO
 
 from .utils import indent
+from . import config, prompts
 
 @dataclass
 class Deps:
     message: discord.Message
     client: discord.Client
+    config: config.Config
 
 agent = Agent(
     deps_type = Deps,
     tools=[duckduckgo_search_tool()]
 )
+
+@agent.system_prompt
+def system_prompt(ctx: RunContext[Deps]):
+    return prompts.SYSTEM_PROMPT.render(client=ctx.deps.client, config=ctx.deps.config),
+
+@agent.instructions
+def add_message_details(ctx: RunContext[Deps], indent=1):
+    msg = ctx.deps.message
+    data = f"""
+Message Author: {msg.author.display_name} (ID: {msg.author.id}). (Use the `get_user_info` tool to get more information about the user.)
+Message ID: {msg.id} - use this in code if you want to do something like download attachments from the message.
+"""
+
+    if not msg.reference:
+        data += "\n\nThe message is not replying to anything."
+    else:
+        data += f"""
+Message Reference:
+    {add_message_details(ctx, indent+1)}
+"""
+        
+    lines = data.splitlines()
+    data = ''.join([(' '* 4 * indent) + line for line in lines])
+
+    return data
 
 class User(BaseModel):
     model_config = ConfigDict(from_attributes=True)
