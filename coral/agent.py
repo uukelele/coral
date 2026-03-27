@@ -8,6 +8,7 @@ import asyncio
 from dataclasses import dataclass
 from contextlib import redirect_stdout, redirect_stderr
 from io import StringIO
+import subprocess as sp
 
 from .utils import indent
 from . import config, prompts
@@ -25,11 +26,12 @@ agent = Agent(
 
 @agent.system_prompt
 def system_prompt(ctx: RunContext[Deps]):
-    return prompts.SYSTEM_PROMPT.render(client=ctx.deps.client, config=ctx.deps.config),
+    return prompts.SYSTEM_PROMPT.render(client=ctx.deps.client, config=ctx.deps.config)
 
 @agent.instructions
-def add_message_details(ctx: RunContext[Deps], indent=1):
-    msg = ctx.deps.message
+def add_message_details(ctx: RunContext[Deps] | discord.Message, indent=1):
+    if not ctx: return 'Message not found.'
+    msg = ctx.deps.message if isinstance(ctx, RunContext) else ctx
     data = f"""
 Message Author: {msg.author.display_name} (ID: {msg.author.id}). (Use the `get_user_info` tool to get more information about the user.)
 Message ID: {msg.id} - use this in code if you want to do something like download attachments from the message.
@@ -40,7 +42,7 @@ Message ID: {msg.id} - use this in code if you want to do something like downloa
     else:
         data += f"""
 Message Reference:
-    {add_message_details(ctx, indent+1)}
+    {add_message_details(msg.reference.resolved, indent+1)}
 """
         
     lines = data.splitlines()
@@ -105,6 +107,31 @@ def get_user_info(ctx: RunContext[Deps]) -> Union[Member, User]:
     return User.model_validate(author)
 
 @agent.tool
+async def run_shell(ctx: RunContext[Deps], command: str, timeout: int = 10) -> str:
+    """
+    This tool allows you to run shell commands on the system.
+
+    Use this to install Python packages, navigate the filesystem, or download files.
+    """
+    print(f"Agent running shell command: {command}")
+
+    try:
+        result = sp.run(command, shell=True, text=True, capture_output=True, timeout=timeout)
+        print(result.stdout + result.stderr)
+        return {
+            'exit_code': result.returncode,
+            'stdout': result.stdout,
+            'stderr': result.stderr,
+        }
+    except sp.TimeoutExpired:
+        return f'Command timed out after {timeout}s.'
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return traceback.format_exc()
+
+
+@agent.tool
 async def run_code(ctx: RunContext[Deps], code: str, timeout: int = 10):
     """
     This tool allows you to run Python code on the system.
@@ -113,6 +140,7 @@ async def run_code(ctx: RunContext[Deps], code: str, timeout: int = 10):
 
     `message` - contains a `discord.Message` object of the current message, if necessary.
     `discord` - the `discord` library.
+    `client`  - the `discord.Client` which you are running on.
     - All other builtins.
 
     You are allowed to use `async`/`await` keywords.
@@ -126,6 +154,8 @@ async def run_code(ctx: RunContext[Deps], code: str, timeout: int = 10):
     Whatever you return MUST be JSON-serializable (or a Pydantic object). If it is not, attempt to serialize it yourself first by e.g. writing a wrapper dictionary.
 
     If there is an error, provide error details to the user.
+
+    If you need a 3rd party package, you can use `run_shell` to install it before running the code. For this, set the timeout to something higher e.g. 120.
     """
     
     warnings = []
