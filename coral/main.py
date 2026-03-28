@@ -6,8 +6,7 @@ import os
 import docker
 import docker.errors
 import hashlib
-
-from rich.progress import Progress, TextColumn, BarColumn, DownloadColumn
+from alive_progress import alive_bar
 
 from .config import load_config, Config
 from .history import init_db
@@ -112,22 +111,35 @@ def run(path: Path = typer.Argument(Path('.'))):
     except docker.errors.ImageNotFound:
         typer.secho(f"Image not found. Pulling {image}...", fg='yellow')
 
-        with Progress(
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            DownloadColumn(),
-        ) as progress:
-            tasks = {}
+        layers = {}
+        with alive_bar(1, title="Pulling image") as bar:
+            last_total = 0
+            last_current = 0
+
             for line in client.api.pull(image, stream=True, decode=True):
-                if 'id' in line and 'progressDetail' in line and 'total' in line['progressDetail']:
+                if 'id' in line and 'progressDetail' in line:
                     layer_id = line['id']
-                    current = line['progressDetail'].get('current', 0)
-                    total = line['progressDetail'].get('total', 0)
+                    detail = line['progressDetail']
 
-                    if layer_id not in tasks:
-                        tasks[layer_id] = progress.add_task(f"[cyan]Layer {layer_id}", total=total)
+                    total = detail.get('total', 0)
+                    current = detail.get('current', 0)
 
-                    progress.update(tasks[layer_id], completed=current)
+                    if total:
+                        layers[layer_id] = (current, total)
+
+                        total_sum = sum(t for _, t in layers.values())
+                        current_sum = sum(c for c, _ in layers.values())
+
+                        bar.text = f"Layers: {len(layers)} active"
+
+                        if total_sum != last_total:
+                            bar.total = total_sum
+                            last_total = total_sum
+
+                        delta = current_sum - last_current
+                        if delta > 0:
+                            bar(delta)
+                            last_current = current_sum
 
     container_id = hashlib.md5(str(path.resolve()).encode()).hexdigest()[:8]
     container_name = f'coral-workspace-{container_id}'
@@ -169,17 +181,17 @@ def run(path: Path = typer.Argument(Path('.'))):
 
         cmd = f'/bin/sh -c "{setup} && pip install -q uv && uv pip install --system {source} && python -m coral.core"'
 
-        typer.secho(f'Booting workspace <{container_id}>...', fg='green')
-        typer.secho(f'╰{cmd}', fg='white')
+        with alive_bar(total=None, title=typer.style(f'Booting workspace <{container_id}>...', fg='green')) as bar:
+            typer.secho(cmd, fg='white')
 
-        container = client.containers.run(
-            image,
-            name = container_name,
-            detach = True,
-            working_dir = '/workspace',
-            volumes = volumes,
-            command = cmd,
-        )
+            container = client.containers.run(
+                image,
+                name = container_name,
+                detach = True,
+                working_dir = '/workspace',
+                volumes = volumes,
+                command = cmd,
+            )
 
     try:
         for log in container.logs(stream=True, follow=True):
