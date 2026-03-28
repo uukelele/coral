@@ -48,13 +48,31 @@ class CoralBot(discord.Client):
             start = time.time()
 
             with Session(self.engine) as session:
+                LIMIT = 50
+
                 stmt = select(Message).where(
                     Message.channel_id == message.channel.id
-                ).order_by(Message.created_at.desc()).limit(50)
+                ).order_by(Message.created_at.desc()).limit(LIMIT + 20)
 
                 messages = session.exec(stmt).all()
 
                 history = [adapter.validate_json(msg.data) for msg in reversed(messages)]
+
+                history = history[-LIMIT:] if len(history) < LIMIT else history
+
+                while history:
+                    first = history[0]
+                    is_orphan = False
+
+                    for part in getattr(first, 'parts', []):
+                        if part.__class__.__name__ in ['ToolReturnPart', 'ToolCallPart']:
+                            is_orphan = True
+                            break
+
+                    if is_orphan:
+                        history.pop(0)
+                    else:
+                        break
             
             try:
                 result = await self.agent.run(
