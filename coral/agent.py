@@ -4,11 +4,13 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from typing import *
 from datetime import datetime
 import discord
+import discord.http
 import asyncio
 from dataclasses import dataclass
 from contextlib import redirect_stdout, redirect_stderr
 from io import StringIO
 import subprocess as sp
+from enum import Enum
 
 from .utils import indent
 from . import config, prompts
@@ -96,6 +98,118 @@ class Member(User):
             return[role.name for role in v if getattr(role, 'name', '') != '@everyone']
         return v
 
+class Message(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    content: str
+    author: User
+    created_at: datetime
+    edited_at: Optional[datetime] = None
+
+    mention_everyone: bool
+    mentions: List[User] = Field(default_factory=list)
+    role_mentions: List[str] = Field(default_factory=list)
+
+    attachments: List[str] = Field(default_factory=list)
+    embeds: List[dict] = Field(default_factory=list)
+
+    pinned: bool
+    tts: bool
+    type: int
+
+    @field_validator("mentions", mode="before")
+    @classmethod
+    def transform_mentions(cls, v):
+        if isinstance(v, list):
+            return [User.model_validate(user) for user in v]
+        return v
+
+    @field_validator("role_mentions", mode="before")
+    @classmethod
+    def transform_role_mentions(cls, v):
+        if isinstance(v, list):
+            return [role.name for role in v if getattr(role, "name", "") != "@everyone"]
+        return v
+
+    @field_validator("attachments", mode="before")
+    @classmethod
+    def transform_attachments(cls, v):
+        if isinstance(v, list):
+            return [attachment.url for attachment in v if isinstance(attachment, discord.Attachment)]
+        return v
+
+    @field_validator("embeds", mode="before")
+    @classmethod
+    def transform_embeds(cls, v):
+        if isinstance(v, list):
+            return [embed.to_dict() for embed in v if isinstance(embed, discord.Embed)]
+        return v
+
+class HasType(str, Enum):
+    LINK = 'link'
+    EMBED = 'embed'
+    POLL = 'poll'
+    FILE = 'file'
+    VIDEO = 'video'
+    IMAGE = 'image'
+    SOUND = 'sound'
+    STICKER = 'sticker'
+    FORWARD = 'forward'
+
+class SortOrder(str, Enum):
+    ASCENDING = 'asc'
+    DESCENDING = 'desc'
+
+class SearchParams(BaseModel):
+    author_id: Optional[int] = None,
+    mentions: Optional[int] = None,
+    has: Optional[HasType] = None,
+    channel_id: Optional[int] = None,
+    pinned: Optional[bool] = None,
+    sort_by: str = 'timestamp'
+    sort_order: Optional[SortOrder] = SortOrder.DESCENDING,
+    offset: int = 0
+
+class SearchResponse(BaseModel):
+    messages: list[Message]
+    total_results: int
+
+@agent.tool
+async def search_discord(
+    ctx: RunContext[Deps],
+    search_params: SearchParams
+) -> SearchResponse:
+    """
+    Search through the entire Discord guild to find certain messages.
+
+    Use this when, for example, a user asks to find the first message sent by a user, in a specific channel, or in the entire server, or containing a specific phrase.
+
+    Param Names
+    - Author ID:
+      - The author of the user who sent the method. Leave empty to not check any authors.
+    - Mentions:
+      - The ID of the user who the message should mention. Leave empty to not check the message mentions.
+    - Has:
+      - Filter only messages which have a certain thing.
+    - Channel ID:
+      - The ID of the channel to search for. Self-explanatory. Like the others, leave this empty to not filter out any channels.
+    - Pinned:
+      - Set this to True to only include pinned messages in the results.
+    - Sort By:
+      - There is only one available option here, that is `timestamp`. I don't know why I even made this an option.
+    - Sort Order:
+      - Descending or Ascending. Self-explanatory.
+    - Offset:
+      - If you want to view page 2, page 3, of results until you find what you are looking for, you can use this. Because each search request returns the total result count as well as the first 20 after your offset.
+    """
+    return SearchResponse.model_validate_json(await ctx.deps.client.http.request(
+        discord.http.Route(
+            method = 'GET',
+            path = f'/guilds/{ctx.deps.message.guild}/messages/search'
+        ),
+        params = search_params.model_dump(mode='json'),
+    ), extra='ignore')
 
 @agent.tool
 def get_user_info(ctx: RunContext[Deps]) -> Union[Member, User]:
