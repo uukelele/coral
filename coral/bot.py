@@ -18,13 +18,32 @@ class CoralBot(discord.Client):
         self.model  = model
         self.engine = engine
 
+        self.tree = discord.app_commands.CommandTree(self)
+
+        @self.tree.context_menu(name="Ask Me")
+        async def ask_me(interaction: discord.Interaction, message: discord.Message):
+
+            if self.config.DISCORD_ALLOWED_USER_OR_ROLE_IDS:
+                if not (
+                    interaction.user.id in self.config.DISCORD_ALLOWED_USER_OR_ROLE_IDS
+                    or
+                    any(
+                        role.id in self.config.DISCORD_ALLOWED_USER_OR_ROLE_IDS
+                        for role in getattr(interaction.user, 'roles', [])
+                    )
+                ):
+                    return
+            # if no config set, allow everyone
+
+            await interaction.response.defer(thinking=True, ephemeral=True)
+            await self._handle_message(message)
+            await interaction.followup.send("I have responded in chat!", ephemeral=True)
+
     async def on_ready(self):
         print(f"Logged in as {self.user.name}.")
+        await self.tree.sync()
 
-    async def on_message(self, message: discord.Message):
-        if message.author == self.user:
-            return
-        
+    async def on_message(self, message: discord.Message):      
         if self.config.DISCORD_ALLOWED_USER_OR_ROLE_IDS:
             if not (
                 message.author.id in self.config.DISCORD_ALLOWED_USER_OR_ROLE_IDS
@@ -42,6 +61,12 @@ class CoralBot(discord.Client):
             and
             not message.content.startswith(self.config.DISCORD_PREFIX)
         ):
+            return
+        
+        return await self._handle_message(message)
+
+    async def _handle_message(self, message: discord.Message):
+        if message.author == self.user:
             return
         
         async with message.channel.typing():
