@@ -7,6 +7,7 @@ import docker
 import docker.errors
 import hashlib
 from alive_progress import alive_bar
+import time
 
 from .config import load_config, Config
 from .history import init_db
@@ -144,10 +145,14 @@ def run(path: Path = typer.Argument(Path('.'))):
     container_id = hashlib.md5(str(path.resolve()).encode()).hexdigest()[:8]
     container_name = f'coral-workspace-{container_id}'
 
+    start = int(time.time())
+
     try:
         container = client.containers.get(container_name)
         if container.status == 'running':
-            typer.secho(f"Workspace <{container_id}> already running. Re-attaching...", fg='yellow')
+            typer.secho(f"Workspace <{container_id}> already running. Restarting...", fg='yellow')
+            container.restart() # so that config.yaml updates
+            # because we are assuming that if someone runs this command they want to rerun it
         else:
             typer.secho(f"Starting workspace <{container_id}>...", fg='green')
             container.start()
@@ -174,32 +179,31 @@ def run(path: Path = typer.Argument(Path('.'))):
         if installed_from_source:
             volumes[str(coral_repo)] = { 'bind': '/opt/coral', 'mode': 'ro' }
             source = '/tmp/coral'
-            setup = 'mkdir -p /tmp/coral && cp -a /opt/coral/. /tmp/coral'
+            setup = 'mkdir -p /tmp/coral && cp -au /opt/coral/. /tmp/coral'
         else:
             setup = "apt-get update -y && apt-get install -y git"
             source = 'git+https://github.com/uukelele/coral.git'
 
+        typer.secho(f'Booting workspace <{container_id}>...', fg='green')
         cmd = f'/bin/sh -c "{setup} && pip install -q uv && uv pip install --system {source} && python -m coral.core"'
+        typer.secho(cmd, fg='white')
 
-        with alive_bar(total=None, title=typer.style(f'Booting workspace <{container_id}>...', fg='green')) as bar:
-            typer.secho(cmd, fg='white')
-
-            container = client.containers.run(
-                image,
-                name = container_name,
-                detach = True,
-                working_dir = '/workspace',
-                volumes = volumes,
-                command = cmd,
-            )
+        container = client.containers.run(
+            image,
+            name = container_name,
+            detach = True,
+            working_dir = '/workspace',
+            volumes = volumes,
+            command = cmd,
+        )
 
     try:
-        for log in container.logs(stream=True, follow=True):
+        for log in container.logs(stream=True, follow=True, since=start):
             print(log.decode(), end='')
     except KeyboardInterrupt:
         pass
 
-    typer.secho('Stopping workspace...', fg='red')
+    typer.secho('\nStopping workspace...', fg='red')
     container.stop(timeout=3)
     typer.secho('Stopped.', fg='white')
 
