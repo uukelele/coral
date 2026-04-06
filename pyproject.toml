@@ -1,6 +1,6 @@
 [project]
 name = "coral"
-version = "0.1.0"
+version = "0.2.0"
 description = "Coral is an AI agent, originally from TitanOS Nebula. It has migrated into a standalone agent, including integrations with other platforms."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -8,7 +8,6 @@ dependencies = [
     "alive-progress>=3.3.0",
     "ddgs>=9.11.4",
     "discord-py>=2.7.1",
-    "docker>=7.1.0",
     "jinja2>=3.1.6",
     "pydantic>=2.12.5",
     "pydantic-ai>=1.70.0",

@@ -1,21 +1,71 @@
-import discord
 import typer
 from pathlib import Path
 import yaml
 import os
-import docker
-import docker.errors
-import hashlib
-from alive_progress import alive_bar
-import time
+import subprocess as sp
 
 from .config import load_config, Config
-from .history import init_db
-from .agent import agent
-from .bot import CoralBot
-from . import prompts
+from .prompts import DEFAULT_EXTRA_PROMPT
 
 app = typer.Typer()
+
+@app.command(name='create-docker')
+def create_dockerfiles(path: Path = typer.Argument(Path('.')), force=False):
+    if not (path / 'config.yaml').exists() and not force:
+        typer.secho('`config.yaml` does not exist in this directory. Please run `coral create` first, or pass --force=True.', fg='yellow')
+        return
+
+    p_dockerfile = path / 'Dockerfile'
+    p_compose    = path / 'docker-compose.yml'
+
+    if p_dockerfile.exists() and p_compose.exists() and not force:
+        typer.secho('`Dockerfile` and `docker-compose.yml` already exist. Please remove them first first, or pass --force=True.', fg='yellow')
+        return
+    
+    repo = Path(__file__).resolve().parent.parent
+    from_source = (repo / 'pyproject.toml').exists()
+
+    dockerfile = """
+FROM python:3.13
+
+WORKDIR /workspace
+"""
+    if not from_source:
+        dockerfile += """
+RUN pip install git+https://github.com/uukelele/coral.git
+"""
+    else: "Coral is installed at runtime from a mounted volume. This is for easier development."
+
+    dockerfile += """
+CMD ["python", "-m", "coral.core"]
+"""
+
+    compose = f"""
+services:
+    bot:
+        build: .
+        container_name: coral-{path.name.lower().replace(' ', '-')}
+        restart: unless-stopped
+        volumes:
+            - .:/workspace
+"""
+    
+    if from_source:
+        compose += f"""
+            - {repo}:/opt/coral:ro
+        
+        command: /bin/sh -c "mkdir -p /tmp/coral && cp -au /opt/coral/. /tmp/coral && pip install /tmp/coral && python -m coral.core"
+"""
+        
+    if not p_dockerfile.exists():
+        typer.secho("[+] Writing Dockerfile...")
+        p_dockerfile.write_text(dockerfile)
+
+    if not p_compose.exists():
+        typer.secho("[+] Writing docker-compose.yml...")
+        p_compose.write_text(compose)
+
+
 
 @app.command()
 def create(path: Path = typer.Argument(Path('.'))):
@@ -52,7 +102,9 @@ def create(path: Path = typer.Argument(Path('.'))):
     )
 
     (path / 'config.yaml').write_text(yaml.dump(base_config.model_dump(mode='json')))
-    (path / 'config.md.j2').write_text(prompts.DEFAULT_EXTRA_PROMPT.render(path=path))
+    (path / 'config.md.j2').write_text(DEFAULT_EXTRA_PROMPT.render(path=path))
+
+    create_dockerfiles(path)
 
     typer.secho(f"[+] Success! All set up! Now go and customize your bot!", fg='green')
 
@@ -85,127 +137,26 @@ def clear(path: Path = typer.Argument(Path('.'))):
         db_path.unlink()
         typer.secho("Memory cleared successfully.", fg='green')
 
-    container_id = hashlib.md5(str(path.resolve()).encode()).hexdigest()[:8]
-    container_name = f'coral-workspace-{container_id}'
-
-    try:
-        client = docker.from_env()
-        container = client.containers.get(container_name)
-        container.remove(force=True)
-        typer.secho(f"Deleted workspace <{container_id}>.", fg='green')
-    except docker.errors.NotFound:
-        typer.secho("No workspace found to clean.", fg='white')
+    if (path / 'docker-compose.yml').exists():
+        typer.secho("Shutting down and removing container...")
+        sp.run(['docker', 'compose', 'down', '-v'])
+        typer.secho("Workspace cleared.", fg='green')
 
 
 @app.command()
 def run(path: Path = typer.Argument(Path('.'))):
     os.chdir(path.resolve())
 
-    client = docker.from_env()
-    image = 'python:3.12'
+    create_dockerfiles(path)
 
-    typer.secho("Checking for Docker image...", fg='white')
+    typer.secho("Booting Coral...", fg='white')
     
     try:
-        client.images.get(image)
-        # typer.secho("Image found!", fg='green')
-    except docker.errors.ImageNotFound:
-        typer.secho(f"Image not found. Pulling {image}...", fg='yellow')
-
-        layers = {}
-        with alive_bar(1, title="Pulling image") as bar:
-            last_total = 0
-            last_current = 0
-
-            for line in client.api.pull(image, stream=True, decode=True):
-                if 'id' in line and 'progressDetail' in line:
-                    layer_id = line['id']
-                    detail = line['progressDetail']
-
-                    total = detail.get('total', 0)
-                    current = detail.get('current', 0)
-
-                    if total:
-                        layers[layer_id] = (current, total)
-
-                        total_sum = sum(t for _, t in layers.values())
-                        current_sum = sum(c for c, _ in layers.values())
-
-                        bar.text = f"Layers: {len(layers)} active"
-
-                        if total_sum != last_total:
-                            bar.total = total_sum
-                            last_total = total_sum
-
-                        delta = current_sum - last_current
-                        if delta > 0:
-                            bar(delta)
-                            last_current = current_sum
-
-    container_id = hashlib.md5(str(path.resolve()).encode()).hexdigest()[:8]
-    container_name = f'coral-workspace-{container_id}'
-
-    start = int(time.time())
-
-    try:
-        container = client.containers.get(container_name)
-        if container.status == 'running':
-            typer.secho(f"Workspace <{container_id}> already running. Restarting...", fg='yellow')
-            container.restart() # so that config.yaml updates
-            # because we are assuming that if someone runs this command they want to rerun it
-        else:
-            typer.secho(f"Starting workspace <{container_id}>...", fg='green')
-            container.start()
-
-    except docker.errors.NotFound:
-        typer.secho(f"Creating new workspace <{container_id}>...", fg='green')
-
-        installed_from_source = False
-
-        coral_repo = Path(__file__).resolve().parent.parent
-        if not (coral_repo / 'pyproject.toml').exists():
-            # Coral is not installed from source.
-            ...
-        else:
-            installed_from_source = True
-
-        volumes = {
-            str(path.resolve()): { 'bind': '/workspace', 'mode': 'rw' }
-        }
-
-        source: str
-        setup: str
-
-        if installed_from_source:
-            volumes[str(coral_repo)] = { 'bind': '/opt/coral', 'mode': 'ro' }
-            source = '/tmp/coral'
-            setup = 'mkdir -p /tmp/coral && cp -au /opt/coral/. /tmp/coral'
-        else:
-            setup = "apt-get update -y && apt-get install -y git"
-            source = 'git+https://github.com/uukelele/coral.git'
-
-        typer.secho(f'Booting workspace <{container_id}>...', fg='green')
-        cmd = f'/bin/sh -c "{setup} && pip install -q uv && uv pip install --system {source} && python -m coral.core"'
-        typer.secho(cmd, fg='white')
-
-        container = client.containers.run(
-            image,
-            name = container_name,
-            detach = True,
-            working_dir = '/workspace',
-            volumes = volumes,
-            command = cmd,
-        )
-
-    try:
-        for log in container.logs(stream=True, follow=True, since=start):
-            print(log.decode(), end='')
+        sp.run(['docker', 'compose', 'up', '--build'])
     except KeyboardInterrupt:
-        pass
-
-    typer.secho('\nStopping workspace...', fg='red')
-    container.stop(timeout=3)
-    typer.secho('Stopped.', fg='white')
+        typer.secho('\nStopping workspace...', fg='red')
+        sp.run(["docker", "compose", "stop"])
+        typer.secho("Stopped.", fg='white')
 
     
 
