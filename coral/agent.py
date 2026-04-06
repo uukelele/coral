@@ -44,7 +44,7 @@ Message ID: {msg.id} - use this in code if you want to do something like downloa
     else:
         data += f"""
 Message Reference:
-    {add_message_details(msg.reference.resolved, indent+1)}
+    {add_message_details(msg.reference.resolved, indent+1) if indent <= 2 else '...'}
 """
         
     lines = data.splitlines()
@@ -162,13 +162,13 @@ class SortOrder(str, Enum):
     DESCENDING = 'desc'
 
 class SearchParams(BaseModel):
-    author_id: Optional[int] = None,
-    mentions: Optional[int] = None,
-    has: Optional[HasType] = None,
-    channel_id: Optional[int] = None,
-    pinned: Optional[bool] = None,
+    author_id: Optional[int] = None
+    mentions: Optional[int] = None
+    has: Optional[HasType] = None
+    channel_id: Optional[int] = None
+    pinned: Optional[bool] = None
     sort_by: str = 'timestamp'
-    sort_order: Optional[SortOrder] = SortOrder.DESCENDING,
+    sort_order: Optional[SortOrder] = SortOrder.DESCENDING
     offset: int = 0
 
 class SearchResponse(BaseModel):
@@ -179,7 +179,7 @@ class SearchResponse(BaseModel):
 async def search_discord(
     ctx: RunContext[Deps],
     search_params: SearchParams
-) -> SearchResponse:
+): # -> SearchResponse:
     """
     Search through the entire Discord guild to find certain messages.
 
@@ -203,13 +203,17 @@ async def search_discord(
     - Offset:
       - If you want to view page 2, page 3, of results until you find what you are looking for, you can use this. Because each search request returns the total result count as well as the first 20 after your offset.
     """
-    return SearchResponse.model_validate_json(await ctx.deps.client.http.request(
-        discord.http.Route(
-            method = 'GET',
-            path = f'/guilds/{ctx.deps.message.guild}/messages/search'
-        ),
-        params = search_params.model_dump(mode='json'),
-    ), extra='ignore')
+    try:
+        # return SearchResponse.model_validate(await ctx.deps.client.http.request(
+        return await ctx.deps.client.http.request(
+            discord.http.Route(
+                method = 'GET',
+                path = f'/guilds/{ctx.deps.message.guild.id}/messages/search'
+            ),
+            params = search_params.model_dump(mode='json', exclude_none=True),
+        )
+    except Exception as e:
+        return {"error": str(e)}
 
 @agent.tool
 def get_user_info(ctx: RunContext[Deps]) -> Union[Member, User]:

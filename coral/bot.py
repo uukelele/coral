@@ -36,7 +36,7 @@ class CoralBot(discord.Client):
             # if no config set, allow everyone
 
             await interaction.response.defer(thinking=True, ephemeral=True)
-            await self._handle_message(message)
+            await self._handle_message(message, [f"Triggered by {interaction.user.mention}"])
             await interaction.followup.send("I have responded in chat!", ephemeral=True)
 
     async def on_ready(self):
@@ -65,7 +65,7 @@ class CoralBot(discord.Client):
         
         return await self._handle_message(message)
 
-    async def _handle_message(self, message: discord.Message):
+    async def _handle_message(self, message: discord.Message, extra_logs: list[str] | None = None):
         if message.author == self.user:
             return
         
@@ -83,7 +83,7 @@ class CoralBot(discord.Client):
 
                 history = [adapter.validate_json(msg.data) for msg in reversed(messages)]
 
-                history = history[-LIMIT:] if len(history) < LIMIT else history
+                history = history[-LIMIT:]
 
                 while history:
                     first = history[0]
@@ -132,7 +132,7 @@ A **critical exception** occured in my main thread.
                 """
                 traceback.print_exc()
             finally:
-                info = []
+                info = extra_logs.copy() if extra_logs else []
 
                 end = time.time()
                 taken = round(end - start, 1)
