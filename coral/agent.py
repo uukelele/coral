@@ -1,5 +1,8 @@
+import pydantic_ai
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.common_tools.duckduckgo import duckduckgo_search_tool
+from pydantic_ai.models import Model
+from pydantic_ai.exceptions import ModelAPIError
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from typing import *
 from datetime import datetime
@@ -9,17 +12,21 @@ import asyncio
 from dataclasses import dataclass
 from contextlib import redirect_stdout, redirect_stderr
 from io import StringIO
+from pathlib import Path
 import subprocess as sp
 from enum import Enum
 
 from .utils import indent
-from . import config, prompts
+from . import config as libcfg, prompts
 
 @dataclass
 class Deps:
-    message: discord.Message
-    client: discord.Client
-    config: config.Config
+    model: Model | str
+    message: discord.Message = None
+    client: discord.Client = None
+    config: libcfg.Config = None
+    is_summary: bool = False
+    is_message: bool = True
 
 agent = Agent(
     deps_type = Deps,
@@ -28,15 +35,28 @@ agent = Agent(
 
 @agent.system_prompt
 def system_prompt(ctx: RunContext[Deps]):
-    return prompts.SYSTEM_PROMPT.render(client=ctx.deps.client, config=ctx.deps.config)
+    if ctx.deps.is_summary:
+        return prompts.SUMMARIZATION_PROMPT
+    
+    if ctx.deps.client and ctx.deps.config:
+        return prompts.SYSTEM_PROMPT.render(client=ctx.deps.client, config=ctx.deps.config)
+    
+    return ''
 
 @agent.instructions
 def add_message_details(ctx: RunContext[Deps] | discord.Message, indent=1):
+    if isinstance(ctx, RunContext) and (not ctx.deps.is_message or not ctx.deps.message): return
     if not ctx: return 'Message not found.'
     msg = ctx.deps.message if isinstance(ctx, RunContext) else ctx
     data = f"""
 Message Author: {msg.author.display_name} (ID: {msg.author.id}). (Use the `get_user_info` tool to get more information about the user.)
 Message ID: {msg.id} - use this in code if you want to do something like download attachments from the message.
+"""
+    
+    if len(msg.attachments) > 0:
+        data += f"""
+{len(msg.attachments)} attachments (if you want to view them, use code to analyse using message ID):
+    {[a.filename for a in msg.attachments]}
 """
 
     if not msg.reference:
@@ -162,10 +182,10 @@ class SortOrder(str, Enum):
     DESCENDING = 'desc'
 
 class SearchParams(BaseModel):
-    author_id: Optional[int] = None
-    mentions: Optional[int] = None
+    author_id: Optional[str] = None
+    mentions: Optional[str] = None
     has: Optional[HasType] = None
-    channel_id: Optional[int] = None
+    channel_id: Optional[str] = None
     pinned: Optional[bool] = None
     sort_by: str = 'timestamp'
     sort_order: Optional[SortOrder] = SortOrder.DESCENDING
@@ -248,7 +268,6 @@ async def run_shell(ctx: RunContext[Deps], command: str, timeout: int = 10) -> s
         traceback.print_exc()
         return traceback.format_exc()
 
-
 @agent.tool
 async def run_code(ctx: RunContext[Deps], code: str, timeout: int = 10):
     """
@@ -322,3 +341,87 @@ async def main(message, discord, client):
         import traceback
         traceback.print_exc()
         return {'warnings': warnings, 'result': traceback.format_exc(), 'stdout': stdout, 'stderr': stderr}
+    
+class FileType(str, Enum):
+    IMAGE = 'image'
+    VIDEO = 'video'
+    AUDIO = 'audio'
+    DOCUMENT = 'document'
+
+@agent.tool
+async def analyse_file(ctx: RunContext[Deps], url: str, file_type: FileType, query: Optional[str] = None) -> str:
+    """
+    This tool analyses a file.
+    Supported file types are dependent on the model, so some models may not support every single input type.
+    However, here are all the possible accepted types:
+
+    - image
+    - audio
+    - video
+    - document (pdf, docs, etc.)
+
+    The url is the path to the file. It can either be a HTTP(S) URL to the file (useful for e.g. Discord CDN links), or
+    an absolute / relative file path.
+
+    The query is the query to give the summarization model.
+
+    If there is no query given, you will receive a summary of the file.
+    If you have a specific query, you will receive a brief summary as well as an answer to the query, e.g. "What colour is the man's shirt?".
+    """
+
+    if url.startswith('http'):
+        match file_type:
+            case FileType.IMAGE:
+                part = pydantic_ai.ImageUrl(url=url, force_download=True)
+            case FileType.AUDIO:
+                part = pydantic_ai.AudioUrl(url=url, force_download=True)
+            case FileType.VIDEO:
+                part = pydantic_ai.VideoUrl(url=url, force_download=True)
+            case FileType.DOCUMENT:
+                part = pydantic_ai.DocumentUrl(url=url, force_download=True)
+
+    else:
+        url = url.removeprefix('file://')
+        path = Path(url)
+        part = pydantic_ai.BinaryContent(path.read_bytes())
+
+    try:
+        response = await agent.run(
+            user_prompt = [
+                part,
+                prompts.CONTENT_SUMMARIZATION_PROMPT.render(query=query),
+            ],
+            model = ctx.deps.model,
+            deps = Deps(is_message=False, model=ctx.deps.model),
+        )
+        return response.output
+    except ModelAPIError as e:
+        return f"There was an API error during the file parsing. See details: {e.message}"
+    except Exception as e:
+        return f"There was an unknown error during the operation. {e}"
+    
+@agent.tool
+async def trigger_reboot(ctx: RunContext[Deps]):
+    """
+    Triggers a reboot of the container you are running in.
+
+    WARNING: Only use this as a last resort, when you really have to.
+
+    When this tool is ran, a message will be sent in the current channel saying that you are restarting.
+
+    You will not be able to see the result of this response, as you will be shutdown.
+
+    When you (automatically) restart, you will not be active until being triggered by another message from a user.
+
+    You can use this tool for things like e.g. when you modify your configuration and want to restart.
+    """
+
+    if ctx.deps.message:
+        await ctx.deps.message.channel.send(embed = discord.Embed(
+            title = "Rebooting...",
+            description = "Agent triggered a reboot of the container.",
+            timestamp = datetime.now(),
+        ))
+
+    import sys
+    sys.exit(0)

@@ -11,15 +11,16 @@ app = typer.Typer()
 
 @app.command(name='create-docker')
 def create_dockerfiles(path: Path = typer.Argument(Path('.')), force=False):
+    path = path.resolve()
     if not (path / 'config.yaml').exists() and not force:
-        typer.secho('`config.yaml` does not exist in this directory. Please run `coral create` first, or pass --force=True.', fg='yellow')
+        # typer.secho('`config.yaml` does not exist in this directory. Please run `coral create` first, or pass --force=True.', fg='yellow')
         return
 
     p_dockerfile = path / 'Dockerfile'
     p_compose    = path / 'docker-compose.yml'
 
     if p_dockerfile.exists() and p_compose.exists() and not force:
-        typer.secho('`Dockerfile` and `docker-compose.yml` already exist. Please remove them first first, or pass --force=True.', fg='yellow')
+        # typer.secho('`Dockerfile` and `docker-compose.yml` already exist. Please remove them first first, or pass --force=True.', fg='yellow')
         return
     
     repo = Path(__file__).resolve().parent.parent

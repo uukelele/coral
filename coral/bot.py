@@ -1,8 +1,12 @@
 import discord
 import time
 from pydantic_ai import Agent, ToolCallPart
+from pydantic_ai.models import Model
+import pydantic_ai.messages
+from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError
 from sqlalchemy import Engine
 from sqlmodel import Session, select
+from datetime import datetime
 
 from .config import Config
 from . import prompts, utils
@@ -10,7 +14,7 @@ from .agent import Deps
 from .history import Message, adapter
 
 class CoralBot(discord.Client):
-    def __init__(self, config: Config, agent: Agent, model, engine: Engine, *args, **kwargs):
+    def __init__(self, config: Config, agent: Agent, model: Model | str, engine: Engine, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
         self.config = config
@@ -98,13 +102,75 @@ class CoralBot(discord.Client):
                         history.pop(0)
                     else:
                         break
+
+                SUMMARIZE_LIMIT = LIMIT // 2
+                split_found = False
+                for i in range(max(0, len(history) - SUMMARIZE_LIMIT), len(history) + 1):
+
+                    if i < len(history) and any(part.__class__.__name__ in ['ToolReturnPart', 'ToolCallPart'] for part in getattr(history[i], 'parts', [])):
+                        continue
+
+                    if i > 0 and any(part.__class__.__name__ in ['ToolReturnPart', 'ToolCallPart'] for part in getattr(history[i-1], 'parts', [])):
+                        continue
+
+                    rest = history[:i]
+                    immediate_context = history[i:]
+                    split_found = True
+                    break
+
+                if not split_found:
+                    if len(history) > SUMMARIZE_LIMIT:
+                        rest = history[:-SUMMARIZE_LIMIT]
+                        immediate_context = history[-SUMMARIZE_LIMIT:]
+                    else:
+                        rest = []
+                        immediate_context = history
             
             try:
+                if rest:
+                    summary = await self.agent.run(
+                        user_prompt     = prompts.SUMMARIZATION_PROMPT,
+                        model           = self.model,
+                        message_history = rest,
+                        deps            = Deps(is_summary=True, model=self.model)
+                    )
+
+                    summary_content = prompts.SUMMARIZED_TEXT + summary.output
+
+                    sum_msg = pydantic_ai.messages.ModelRequest(
+                        parts=[
+                            pydantic_ai.messages.UserPromptPart(content=summary_content)
+                        ],
+                    )
+
+                    immediate_context = [
+                        sum_msg,
+                        *immediate_context
+                    ]
+
+                    with Session(self.engine) as session:
+                        old_records = session.exec(select(Message).where(
+                            Message.channel_id == message.channel.id
+                        ).order_by(Message.created_at.asc()).limit(len(rest))).all()
+
+                        [session.delete(r) for r in old_records]
+
+                        summary_record = Message(
+                            channel_id = message.channel.id,
+                            data = adapter.dump_json(sum_msg).decode(),
+                            created_at = datetime.fromtimestamp(0),
+                        )
+
+                        session.add(summary_record)
+
+                        session.commit()
+
+
                 result = await self.agent.run(
-                    user_prompt     = utils.clean(message).removeprefix(self.config.DISCORD_PREFIX),
-                    deps            = Deps(message=message, client=self, config=self.config),
+                    user_prompt     = message.author.display_name + ": " + utils.clean(message).removeprefix(self.config.DISCORD_PREFIX),
+                    deps            = Deps(message=message, client=self, config=self.config, model=self.model),
                     model           = self.model,
-                    message_history = history,
+                    message_history = immediate_context,
                 )
                 response = result.output
 
@@ -116,6 +182,17 @@ class CoralBot(discord.Client):
                         )
                         session.add(record)
                     session.commit()
+
+            except (ModelHTTPError, ModelAPIError) as e:
+                result = None
+                response = f"""
+## 🚨 Error
+
+An **upstream API error** occured.
+
+**Error Details:**
+{e.message}
+"""
             
             except Exception as e:
                 import traceback
