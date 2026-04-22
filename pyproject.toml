@@ -1,6 +1,6 @@
 [project]
 name = "coral"
-version = "0.3.0"
+version = "0.3.1"
 description = "Coral is an AI agent, originally from TitanOS Nebula. It has migrated into a standalone agent, including integrations with other platforms."
 readme = "README.md"
 requires-python = ">=3.11"

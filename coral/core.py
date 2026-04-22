@@ -11,6 +11,7 @@ from .agent import agent
 def main():
     config = load_config()
 
+    from pydantic_ai import ModelSettings
     from pydantic_ai.models.openai import OpenAIChatModel
     from pydantic_ai.providers.openai import OpenAIProvider
 
@@ -20,7 +21,8 @@ def main():
             provider = OpenAIProvider(
                 base_url = config.AI_OPENAI_COMPATIBLE_BASE_URL,
                 api_key  = config.AI_API_KEY or os.getenv('AI_API_KEY') or 'X', # some APIs are keyless
-            )
+            ),
+            settings = config.AI_EXTRA_CONFIG,
         )
     else:
         model = config.AI_MODEL_NAME
