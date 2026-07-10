@@ -241,22 +241,35 @@ A **critical exception** occured in my main thread.
                 response += f"\n\n" + '\n'.join(f"-# {msg}" for msg in info)
 
         
+        allow_everyone = tier is not None and tier.allow_ping_everyone
+
         # Only let the bot ping roles that the triggering user is actually allowed
-        # to ping; others are downgraded to plain-text role names.
-        response = utils.sanitize_role_mentions(response, message.guild, message.channel, author)
+        # to ping; others are downgraded to plain-text role names. Returns the list
+        # of roles that are OK to ping so we can enforce it at the API level too.
+        response, allowed_roles = utils.sanitize_role_mentions(
+            response, message.guild, message.channel, author, allow_everyone
+        )
 
         # Unless the triggering tier explicitly allows it, hard-strip @everyone /
         # @here so the bot can never mass-ping. Defaults to off (also in legacy mode).
-        if not (tier is not None and tier.allow_ping_everyone):
+        if not allow_everyone:
             response = utils.neutralize_mass_mentions(response)
+
+        # Hard, API-level safety net: even if any mention slips through the text
+        # sanitization above, Discord itself will refuse to deliver disallowed pings.
+        allowed_mentions = discord.AllowedMentions(
+            everyone = allow_everyone,
+            users    = True,
+            roles    = allowed_roles,
+        )
 
         chunks = utils.chunk_string(response)
 
         first = chunks.pop(0)
-        await message.reply(first)
+        await message.reply(first, allowed_mentions=allowed_mentions)
 
         for chunk in chunks:
-            await message.channel.send(chunk)
+            await message.channel.send(chunk, allowed_mentions=allowed_mentions)
 
     async def on_error(self, event_method: str, /, *args, **kwargs):
         import traceback, os
