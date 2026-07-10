@@ -4,7 +4,7 @@ import yaml
 import os
 import subprocess as sp
 
-from .config import load_config, Config
+from .config import load_config, Config, Tier
 from .prompts import DEFAULT_EXTRA_PROMPT
 
 app = typer.Typer()
@@ -92,7 +92,28 @@ def create(path: Path = typer.Argument(Path('.'))):
     base_config = Config(
         DISCORD_TOKEN  = "Paste your Discord token here.",
         DISCORD_PREFIX = '--',
-        DISCORD_ALLOWED_USER_OR_ROLE_IDS = None,
+
+        # Tiered access control. Tiers are ranked top-to-bottom (the first tier is
+        # the highest rank); a user gets the highest tier they match. `allowed_tools`
+        # accepts tool names or "*" for every tool, and defaults to none. `allow_chat`
+        # controls whether the tier may talk to the bot at all and defaults to true.
+        # The `default` tier applies to everyone who matches no other tier.
+        #
+        # Available tools: duckduckgo_search, search_discord, get_user_info,
+        # run_shell, run_code, analyse_file, trigger_reboot.
+        #
+        # (Legacy `DISCORD_ALLOWED_USER_OR_ROLE_IDS` is still supported if you prefer
+        #  the old single allow-list; leave `tiers` unset to use it instead.)
+        tiers = {
+            'admin': Tier(
+                allowed_roles_or_user_ids = [123456789012345678],
+                allowed_tools = ['*'],
+            ),
+            'default': Tier(
+                allowed_tools = [],
+                allow_chat = True,
+            ),
+        },
 
         AI_MODEL_NAME = 'google-gla:gemini-flash-latest',
         AI_API_KEY = "Put your API key here.",

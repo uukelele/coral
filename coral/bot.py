@@ -27,38 +27,46 @@ class CoralBot(discord.Client):
         @self.tree.context_menu(name="Ask Me")
         async def ask_me(interaction: discord.Interaction, message: discord.Message):
 
-            if self.config.DISCORD_ALLOWED_USER_OR_ROLE_IDS:
-                if not (
-                    interaction.user.id in self.config.DISCORD_ALLOWED_USER_OR_ROLE_IDS
-                    or
-                    any(
-                        role.id in self.config.DISCORD_ALLOWED_USER_OR_ROLE_IDS
-                        for role in getattr(interaction.user, 'roles', [])
-                    )
-                ):
-                    return
-            # if no config set, allow everyone
+            # Permissions are based on the user who triggered the command, not the
+            # author of the message being asked about. So a privileged user can use
+            # "Ask Me" on a lower-ranked user's message and still get a response.
+            allowed, tier = self._may_chat(interaction.user)
+            if not allowed:
+                return
 
             await interaction.response.defer(thinking=True, ephemeral=True)
-            await self._handle_message(message, [f"Triggered by {interaction.user.mention}"])
+            await self._handle_message(message, [f"Triggered by {interaction.user.mention}"], tier=tier)
             await interaction.followup.send("I have responded in chat!", ephemeral=True)
+
+    def _role_ids(self, user) -> list[int]:
+        return [role.id for role in getattr(user, 'roles', [])]
+
+    def _legacy_allowed(self, user) -> bool:
+        # Backward-compatible allow-list used when `tiers` is not configured.
+        allowed = self.config.DISCORD_ALLOWED_USER_OR_ROLE_IDS
+        if not allowed:
+            # if no config set, allow everyone
+            return True
+        return user.id in allowed or any(rid in allowed for rid in self._role_ids(user))
+
+    def _may_chat(self, user):
+        """
+        Returns (allowed, tier). `tier` is None in legacy mode (no tiers configured),
+        in which case tool access is unrestricted for backward compatibility.
+        """
+        tier = self.config.resolve_tier(user.id, self._role_ids(user))
+        if tier is None:
+            return self._legacy_allowed(user), None
+        return tier.allow_chat, tier
 
     async def on_ready(self):
         print(f"Logged in as {self.user.name}.")
         await self.tree.sync()
 
-    async def on_message(self, message: discord.Message):      
-        if self.config.DISCORD_ALLOWED_USER_OR_ROLE_IDS:
-            if not (
-                message.author.id in self.config.DISCORD_ALLOWED_USER_OR_ROLE_IDS
-                or
-                any(
-                    role.id in self.config.DISCORD_ALLOWED_USER_OR_ROLE_IDS
-                    for role in getattr(message.author, 'roles', [])
-                )
-            ):
-                return
-        # if no config set, allow everyone
+    async def on_message(self, message: discord.Message):
+        allowed, tier = self._may_chat(message.author)
+        if not allowed:
+            return
 
         if (
             self.user not in message.mentions
@@ -67,9 +75,9 @@ class CoralBot(discord.Client):
         ):
             return
         
-        return await self._handle_message(message)
+        return await self._handle_message(message, tier=tier)
 
-    async def _handle_message(self, message: discord.Message, extra_logs: list[str] | None = None):
+    async def _handle_message(self, message: discord.Message, extra_logs: list[str] | None = None, tier=None):
         if message.author == self.user:
             return
         
@@ -168,7 +176,7 @@ class CoralBot(discord.Client):
 
                 result = await self.agent.run(
                     user_prompt     = message.author.display_name + ": " + utils.clean(message).removeprefix(self.config.DISCORD_PREFIX),
-                    deps            = Deps(message=message, client=self, config=self.config, model=self.model),
+                    deps            = Deps(message=message, client=self, config=self.config, model=self.model, tier=tier),
                     model           = self.model,
                     message_history = immediate_context,
                 )

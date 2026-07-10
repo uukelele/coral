@@ -1,5 +1,6 @@
 import pydantic_ai
 from pydantic_ai import Agent, RunContext
+from pydantic_ai.tools import ToolDefinition
 from pydantic_ai.common_tools.duckduckgo import duckduckgo_search_tool
 from pydantic_ai.models import Model
 from pydantic_ai.exceptions import ModelAPIError
@@ -27,10 +28,28 @@ class Deps:
     config: libcfg.Config = None
     is_summary: bool = False
     is_message: bool = True
+    # The resolved permission tier of the user who triggered this run.
+    # `None` means tiers are not configured (legacy mode) and all tools are allowed.
+    tier: Optional[libcfg.Tier] = None
+
+async def restrict_tools_by_tier(ctx: RunContext[Deps], tool_def: ToolDefinition):
+    """
+    Per-run tool gate. When a tier is set on the deps, only tools permitted by that
+    tier's `allowed_tools` are exposed to the model. `"*"` allows everything, an
+    empty list allows nothing. When no tier is set (legacy mode), all tools remain
+    available for backward compatibility.
+    """
+    tier = getattr(ctx.deps, 'tier', None)
+    if tier is None:
+        return tool_def
+    return tool_def if tier.can_use_tool(tool_def.name) else None
+
+_ddg_tool = duckduckgo_search_tool()
+_ddg_tool.prepare = restrict_tools_by_tier
 
 agent = Agent(
     deps_type = Deps,
-    tools=[duckduckgo_search_tool()]
+    tools=[_ddg_tool]
 )
 
 @agent.system_prompt
@@ -195,7 +214,7 @@ class SearchResponse(BaseModel):
     messages: list[Message]
     total_results: int
 
-@agent.tool
+@agent.tool(prepare=restrict_tools_by_tier)
 async def search_discord(
     ctx: RunContext[Deps],
     search_params: SearchParams
@@ -235,7 +254,7 @@ async def search_discord(
     except Exception as e:
         return {"error": str(e)}
 
-@agent.tool
+@agent.tool(prepare=restrict_tools_by_tier)
 def get_user_info(ctx: RunContext[Deps]) -> Union[Member, User]:
     """Get the information of the user who sent the message."""
     author = ctx.deps.message.author
@@ -244,7 +263,7 @@ def get_user_info(ctx: RunContext[Deps]) -> Union[Member, User]:
     
     return User.model_validate(author)
 
-@agent.tool
+@agent.tool(prepare=restrict_tools_by_tier)
 async def run_shell(ctx: RunContext[Deps], command: str, timeout: int = 10) -> str:
     """
     This tool allows you to run shell commands on the system.
@@ -268,7 +287,7 @@ async def run_shell(ctx: RunContext[Deps], command: str, timeout: int = 10) -> s
         traceback.print_exc()
         return traceback.format_exc()
 
-@agent.tool
+@agent.tool(prepare=restrict_tools_by_tier)
 async def run_code(ctx: RunContext[Deps], code: str, timeout: int = 10):
     """
     This tool allows you to run Python code on the system.
@@ -348,7 +367,7 @@ class FileType(str, Enum):
     AUDIO = 'audio'
     DOCUMENT = 'document'
 
-@agent.tool
+@agent.tool(prepare=restrict_tools_by_tier)
 async def analyse_file(ctx: RunContext[Deps], url: str, file_type: FileType, query: Optional[str] = None) -> str:
     """
     This tool analyses a file.
@@ -400,7 +419,7 @@ async def analyse_file(ctx: RunContext[Deps], url: str, file_type: FileType, que
     except Exception as e:
         return f"There was an unknown error during the operation. {e}"
     
-@agent.tool
+@agent.tool(prepare=restrict_tools_by_tier)
 async def trigger_reboot(ctx: RunContext[Deps]):
     """
     Triggers a reboot of the container you are running in.
