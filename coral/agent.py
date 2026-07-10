@@ -52,7 +52,12 @@ agent = Agent(
     tools=[_ddg_tool]
 )
 
-@agent.system_prompt
+# Delivered as instructions (not a system_prompt) so it is re-injected on every
+# run. A system_prompt is baked into the stored message history only once and is
+# NOT regenerated when message_history is passed, which means it (and the included
+# config.md.j2) gets lost as soon as the conversation is summarized and old history
+# records are pruned. Instructions are always regenerated and never persisted.
+@agent.instructions
 def system_prompt(ctx: RunContext[Deps]):
     if ctx.deps.is_summary:
         return prompts.SUMMARIZATION_PROMPT
