@@ -35,7 +35,7 @@ class CoralBot(discord.Client):
                 return
 
             await interaction.response.defer(thinking=True, ephemeral=True)
-            await self._handle_message(message, [f"Triggered by {interaction.user.mention}"], tier=tier)
+            await self._handle_message(message, [f"Triggered by {interaction.user.mention}"], tier=tier, author=interaction.user)
             await interaction.followup.send("I have responded in chat!", ephemeral=True)
 
     def _role_ids(self, user) -> list[int]:
@@ -77,9 +77,13 @@ class CoralBot(discord.Client):
         
         return await self._handle_message(message, tier=tier)
 
-    async def _handle_message(self, message: discord.Message, extra_logs: list[str] | None = None, tier=None):
+    async def _handle_message(self, message: discord.Message, extra_logs: list[str] | None = None, tier=None, author=None):
         if message.author == self.user:
             return
+
+        # The user who triggered the bot. For normal messages this is the message
+        # author; for the "Ask Me" context menu it is whoever invoked it.
+        author = author or message.author
         
         async with message.channel.typing():
             start = time.time()
@@ -237,6 +241,10 @@ A **critical exception** occured in my main thread.
                 response += f"\n\n" + '\n'.join(f"-# {msg}" for msg in info)
 
         
+        # Only let the bot ping roles that the triggering user is actually allowed
+        # to ping; others are downgraded to plain-text role names.
+        response = utils.sanitize_role_mentions(response, message.guild, message.channel, author)
+
         # Unless the triggering tier explicitly allows it, hard-strip @everyone /
         # @here so the bot can never mass-ping. Defaults to off (also in legacy mode).
         if not (tier is not None and tier.allow_ping_everyone):
