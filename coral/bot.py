@@ -237,6 +237,11 @@ A **critical exception** occured in my main thread.
                 response += f"\n\n" + '\n'.join(f"-# {msg}" for msg in info)
 
         
+        # Unless the triggering tier explicitly allows it, hard-strip @everyone /
+        # @here so the bot can never mass-ping. Defaults to off (also in legacy mode).
+        if not (tier is not None and tier.allow_ping_everyone):
+            response = utils.neutralize_mass_mentions(response)
+
         chunks = utils.chunk_string(response)
 
         first = chunks.pop(0)

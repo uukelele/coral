@@ -1,6 +1,17 @@
 def chunk_string(s: str, size: int = 2000):
     return [s[i:i+size] for i in range(0, len(s), size)]
 
+import re as _re
+
+_MASS_MENTION_RE = _re.compile(r'@(everyone|here)')
+
+def neutralize_mass_mentions(text: str) -> str:
+    """
+    Hard-strip `@everyone` / `@here` mass mentions from outgoing text by removing
+    the leading `@`, turning them into the harmless words `everyone` / `here`.
+    """
+    return _MASS_MENTION_RE.sub(r'\1', text)
+
 def indent(text, spaces):
     prefix = " " * spaces
     return '\n'.join(prefix + line for line in text.splitlines())

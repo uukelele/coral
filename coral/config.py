@@ -16,11 +16,15 @@ class Tier(BaseModel):
       list (no tools). The special value `"*"` allows every tool.
     - `allow_chat`: whether members of this tier may talk to the bot at all.
       Defaults to `True`.
+    - `allow_ping_everyone`: whether the bot is allowed to emit `@everyone` /
+      `@here` mass-pings in responses triggered by this tier. Defaults to `False`;
+      when off, those tokens are hard-replaced with plain `everyone` / `here`.
     """
 
     allowed_roles_or_user_ids: Optional[List[int]] = None
     allowed_tools: List[str] = []
     allow_chat: bool = True
+    allow_ping_everyone: bool = False
 
     def can_use_tool(self, tool_name: str) -> bool:
         return '*' in self.allowed_tools or tool_name in self.allowed_tools
