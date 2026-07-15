@@ -43,6 +43,7 @@ class Config(BaseModel):
     AI_MODEL_NAME: str
     AI_API_KEY: Optional[str] = None
     AI_OPENAI_COMPATIBLE_BASE_URL: Optional[str] = None
+    AI_ANTHROPIC_COMPATIBLE_BASE_URL: Optional[str] = None
     AI_EXTRA_CONTEXT_PATH: str = 'config.md.j2'
     AI_EXTRA_CONFIG: dict[str, Any] = {}
 

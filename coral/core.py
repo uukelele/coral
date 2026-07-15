@@ -14,15 +14,26 @@ def main():
     from pydantic_ai import ModelSettings
     from pydantic_ai.models.openai import OpenAIChatModel
     from pydantic_ai.providers.openai import OpenAIProvider
+    from pydantic_ai.models.anthropic import AnthropicModel
+    from pydantic_ai.providers.anthropic import AnthropicProvider
 
     if config.AI_OPENAI_COMPATIBLE_BASE_URL:
         model = OpenAIChatModel(
             config.AI_MODEL_NAME,
             provider = OpenAIProvider(
                 base_url = config.AI_OPENAI_COMPATIBLE_BASE_URL,
-                api_key  = config.AI_API_KEY or os.getenv('AI_API_KEY') or 'X', # some APIs are keyless
+                api_key  = config.AI_API_KEY or os.getenv('AI_API_KEY') or os.getenv('OPENAI_API_KEY') or 'X', # some APIs are keyless
             ),
             settings = config.AI_EXTRA_CONFIG,
+        )
+    elif config.AI_ANTHROPIC_COMPATIBLE_BASE_URL:
+        model = AnthropicModel(
+            config.AI_MODEL_NAME,
+            provider = AnthropicProvider(
+                base_url = config.AI_ANTHROPIC_COMPATIBLE_BASE_URL,
+                api_key  = config.AI_API_KEY or os.getenv('AI_API_KEY') or os.getenv('ANTHROPIC_API_KEY') or os.getenv('OPENAI_API_KEY') or 'X',
+            ),
+            settings = config.AI_EXRA_CONFIG,
         )
     else:
         model = config.AI_MODEL_NAME
