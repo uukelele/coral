@@ -33,7 +33,7 @@ def main():
                 base_url = config.AI_ANTHROPIC_COMPATIBLE_BASE_URL,
                 api_key  = config.AI_API_KEY or os.getenv('AI_API_KEY') or os.getenv('ANTHROPIC_API_KEY') or os.getenv('OPENAI_API_KEY') or 'X',
             ),
-            settings = config.AI_EXRA_CONFIG,
+            settings = config.AI_EXTRA_CONFIG,
         )
     else:
         model = config.AI_MODEL_NAME
