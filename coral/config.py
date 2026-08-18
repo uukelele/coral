@@ -12,11 +12,12 @@ TOOL_GROUPS = {
     'discord:admin':  ['search_discord'], # this is in the `discord:admin` group as search_discord can access even hidden/private/admin channels which we don't always want to expose
     'planning':       ['write_plan', 'read_plan', 'add_task', 'update_task_status', 'update_task_statuses', 'remove_task', 'add_subtask', 'set_dependency', 'get_available_tasks', 'delegate_task'],
     'coder':          [
-                        'read_file', 'write_file', 'edit_file', 'list_directory', 'search_files', 'find_files', 'create_directory', 'file_info', # filesystem
+                        'read_file', 'write_file', 'edit_file', 'list_directory', 'search_files', 'find_files', 'create_directory', 'file_info', 'attach_file', # filesystem # attach file is here as it provides arbitrary file read (constrained to /workspace, but still file read of sensitive e.g. config.yaml)
                         'run_command', 'start_command', 'check_command', 'stop_command', 'run_shell', 'run_code', 'trigger_reboot', # code execution
+                        'create_service', 'list_services', 'service_status', 'stop_service', 'restart_service', 'remove_service', # services
                       ],
     'memory':         [
-                        'set_reminder', 'cancel_reminder', 'list_reminders', # reminders
+                        'set_automation', 'cancel_automation', 'list_automations', # automations
                         'read_memory', 'write_memory', 'search_memory', 'delete_memory', # memory
                       ],
     'moderation':     ['timeout_user', 'ban_user', 'unban_user', 'cancel_timeout'],

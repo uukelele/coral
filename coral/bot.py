@@ -13,9 +13,9 @@ from typing import Optional, Sequence, TypedDict, Literal
 from collections import deque
 
 from .config import Config, Tier
-from . import prompts, utils, reminders, moderation
+from . import prompts, utils, reminders, moderation, services
 from .agent import Deps, add_message_details
-from .history import Message, adapter
+from .history import Message, adapter, Automation
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +44,9 @@ class CoralBot(discord.Client):
         self.rate_hits: dict[int, deque] = {}               # user    id : timestamps
 
         self.scheduler = reminders.Scheduler(self)
+
+        self.ev_automations: dict[str, list[dict]] = {}
+        self.supervisor = services.ServiceSupervisor(self)
 
         self.tree = discord.app_commands.CommandTree(self)
 
@@ -164,9 +167,58 @@ class CoralBot(discord.Client):
 
         return await self.enqueue_guide(message, entry)
 
+    def dispatch(self, event, /, *args, **kwargs):
+        super().dispatch(event, *args, **kwargs)
+        for auto in self.ev_automations.get(event, []):
+            self.loop.create_task(reminders.fire_automation(self, auto['action'], auto['payload'], auto['channel_id'], auto['author_id'], auto['guild_id'], event_args=args))
+
+    def register_event_automation(self, row: dict) -> bool:
+        if any(a['name'] == row['name'] for autos in self.ev_automations.values() for a in autos): return False
+
+        with Session(self.engine) as session:
+            if session.get(Automation, row['name']): return False
+
+            session.add(Automation(
+                name = row['name'],
+                event = row['event'],
+                action = row['action'],
+                payload = row['payload'],
+                channel_id = row['channel_id'],
+                author_id = row['author_id'],
+                guild_id = row['guild_id'],
+            ))
+            session.commit()
+
+        self.ev_automations.setdefault(row['event'], []).append(row)
+        return True
+
+    def unregister_event_automation(self, name: str) -> bool:
+        found = False
+        for bare, autos in list(self.ev_automations.items()):
+            kept = [a for a in autos if a['name'] != name]
+            if len(kept) != len(autos):
+                found = True
+                if kept: self.ev_automations[bare] = kept
+                else: del self.ev_automations[bare]
+        with Session(self.engine) as session:
+            row = session.get(Automation, name)
+            if row:
+                session.delete(row)
+                session.commit()
+                found = True
+        return found
+
+    def _load_event_automations(self):
+        with Session(self.engine) as session:
+            for row in session.exec(select(Automation)).all():
+                self.ev_automations.setdefault(row.event, []).append({ 'name': row.name, 'event': row.event, 'action': row.action, 'payload': row.payload, 'channel_id': row.channel_id, 'author_id': row.author_id, 'guild_id': row.guild_id })
+
     async def on_ready(self):
         logger.info("Logged in as %s",  self.user.name)
         await self.tree.sync()
+
+        if getattr(self, '_booted', False): return
+        setattr(self, '_booted', True)
 
         resume = Path('/workspace/.pending')
         if resume.exists():
@@ -191,6 +243,9 @@ class CoralBot(discord.Client):
 
         # send the agent the reboot thing before any schedules
         await self.scheduler.start()
+
+        self._load_event_automations()
+        await self.supervisor.start_all()
 
 
 
@@ -253,6 +308,10 @@ class CoralBot(discord.Client):
     ):
 
         reply_target = message
+
+        files_to_attach: list[str] = []
+
+        deps = None
         
         async with channel.typing():
             start = time.time()
@@ -308,6 +367,8 @@ class CoralBot(discord.Client):
                             ))
                         session.commit()
 
+                    files_to_attach = list(deps.attached_files)
+
                     if deps.reboot_requested:
                         deps.reboot_requested = False
                         import sys
@@ -329,6 +390,9 @@ class CoralBot(discord.Client):
 
             except (ModelHTTPError, ModelAPIError) as e:
                 result = None
+                if deps and deps.status_message:
+                    try: await deps.status_message.delete()
+                    except: pass
                 response = f"""
 ## 🚨 Error
 
@@ -392,13 +456,28 @@ A **critical exception** occured in my main thread.
             roles    = allowed_roles,
         )
 
+        response, code_files = utils.extract_large_codeblocks(response)
+        files_to_attach.extend(code_files)
+
         chunks = utils.chunk_string(response)
+        files = [discord.File(p) for p in files_to_attach if Path(p).is_file()][:10]
 
-        first = chunks.pop(0)
-        await (reply_target.reply if reply_target else channel.send)(first, allowed_mentions=allowed_mentions)
+        for i, chunk in enumerate(chunks):
+            kwargs = {'allowed_mentions': allowed_mentions}
+            if i == (len(chunks) - 1) and files:
+                kwargs['files'] = files
+            elif i == 0:
+                try:
+                    await (reply_target.reply if reply_target else channel.send)(chunk, **kwargs)
+                    continue
+                except Exception: # discord.errors.HTTPException: 400 Bad Request (error code: 50035): Invalid Form Body In message_reference: Unknown message -> message was deleted
+                    await channel.send(chunk, **kwargs)
+            
+            await channel.send(chunk, **kwargs)
 
-        for chunk in chunks:
-            await channel.send(chunk, allowed_mentions=allowed_mentions)
+        for p in code_files:
+            try: os.unlink(p)
+            except Exception: ...
 
     async def on_error(self, event_method: str, /, *args, **kwargs):
         import traceback, os

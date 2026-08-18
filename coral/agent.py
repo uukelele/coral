@@ -7,7 +7,7 @@ from pydantic_ai_harness.guardrails import ToolCallInfo
 from pydantic_ai_harness.memory import FileStore
 from pydantic_ai.tools import ToolDefinition
 from pydantic_ai.models import Model
-from pydantic_ai.exceptions import ModelAPIError
+from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError
 from pydantic_ai.messages import TextPart, ToolCallPart, RetryPromptPart
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from typing import *
@@ -27,10 +27,15 @@ import logging
 import json
 import re
 
-from .utils import indent
-from . import config as libcfg, prompts, reminders, moderation
+from . import config as libcfg, prompts, reminders, moderation, utils
 
 logger = logging.getLogger(__name__)
+
+ATTACHMENT_MAX_BYTES = 8 * 1024 * 1024 # discord limit 8MB file size for bots
+ATTACHMENT_MAX_COUNT = 10
+ATTACHMENT_SOURCES = ('/workspace', '/tmp')
+
+MAX_RETRIES = 3
 
 @dataclasses.dataclass
 class Deps:
@@ -44,6 +49,8 @@ class Deps:
     scheduler: Optional[reminders.Scheduler] = None
     author_id: Optional[int] = None
     guild_id: Optional[int] = None
+    attached_files: list[str] = dataclasses.field(default_factory=list)
+    status_message: Optional[discord.Message] = None
 
 async def denial_reason(ctx: RunContext[Deps], tool_name: str) -> str | None:
     tier: libcfg.Tier = getattr(ctx.deps, 'tier', None)
@@ -71,6 +78,38 @@ async def block_unauthorized(ctx: RunContext[Deps], call: ToolCallInfo) -> Guard
     return GuardrailResult.allow()
 
 hooks = Hooks()
+
+@hooks.on.model_request
+async def retry_5xx(ctx: RunContext[Deps], *, request_context, handler):
+    attempt = 0
+    while True:
+        try:
+            resp = await handler(request_context)
+        except ModelHTTPError as e:
+            if not (500 <= e.status_code <= 599):
+                raise
+
+            attempt += 1
+            if attempt > MAX_RETRIES:
+                raise
+
+            if ctx.deps.message:
+                text = f"⚠️ Provider returned error {e.status_code}. Retrying ({attempt}/{MAX_RETRIES})..."
+                try:
+                    if ctx.deps.status_message is None:
+                        ctx.deps.status_message = await ctx.deps.message.channel.send(text)
+                    else:
+                        await ctx.deps.status_message.edit(content=text)
+                except Exception: ...
+
+            await asyncio.sleep(min((getattr(e, 'retry_after', None) or 0) or 2 ** (attempt - 1), 30))
+            continue
+
+        if ctx.deps.status_message is not None:
+            try: await ctx.deps.status_message.delete()
+            except Exception: ...
+
+        return resp
 
 @hooks.on.after_model_request
 async def send_text_updates(ctx: RunContext[Deps], *, request_context, response):
@@ -373,52 +412,7 @@ async def run_code(ctx: RunContext[Deps], code: str, timeout: int = 10):
     If you need a 3rd party package, you can use `run_shell` to install it before running the code. For this, set the timeout to something higher e.g. 120.
     """
     
-    warnings = []
-
-    has_main = re.search(r'(?m)^async def main\(message, discord, client\):', code)
-    if not has_main:
-        warnings.append("Your code didn't start with `async def main(message, discord, client):`. So the system added it for you and indented your code appropriately. If you don't receive any output / receive None, it's because you didn't have a `return` statement. You should try again and format the code properly within the function and return properly.")
-
-        code = f"""
-async def main(message, discord, client):
-{indent(code, 4)}
-        """
-
-    ns = { '__builtins__': __builtins__ }
-
-    stdout_buffer = StringIO()
-    stderr_buffer = StringIO()
-
-    logger.debug("Agent attempted to run code:")
-    logger.debug(code)
-    logger.debug("Running...")
-
-    stdout = ''
-    stderr = ''
-    try:
-        with redirect_stdout(stdout_buffer), redirect_stderr(stderr_buffer):
-            exec(code, ns)
-            func = ns['main']
-
-            result = await asyncio.wait_for(
-                func(ctx.deps.message, discord, ctx.deps.client),
-                timeout = timeout,
-            )
-
-        stdout = stdout_buffer.getvalue()
-        stderr = stderr_buffer.getvalue()
-
-        logger.debug("Result: %s", result)
-        print(stdout + stderr)
-
-        return {'warnings': warnings, 'result': result, 'stdout': stdout, 'stderr': stderr}
-    except asyncio.TimeoutError:
-        logger.debug("Execution timed out.")
-        return {'warnings': warnings, 'result': "Execution timed out.", 'stdout': stdout, 'stderr': stderr}
-    except Exception as e:
-        import traceback
-        logger.debug(traceback.format_exc(), exc_info=e)
-        return {'warnings': warnings, 'result': traceback.format_exc(), 'stdout': stdout, 'stderr': stderr}
+    return await utils.run_code(code, "async def main(message, discord, client):", ctx.deps.message, discord, ctx.deps.client)
     
 class FileType(str, Enum):
     IMAGE = 'image'
@@ -500,7 +494,7 @@ async def analyse_file(ctx: RunContext[Deps], url: str, file_type: FileType, que
             part = pydantic_ai.TextContent(path.read_text())
         else:
             mtype = mimetypes.guess_type(str(path))[0] or 'application/octet-stream'
-            part = pydantic_ai.BinaryContent(data=path.read_bytes(), media_type=media_type)
+            part = pydantic_ai.BinaryContent(data=path.read_bytes(), media_type=mtype)
 
     try:
         response = await agent.run(
@@ -550,59 +544,91 @@ async def trigger_reboot(ctx: RunContext[Deps]):
 
     return "The container will reboot now."
 
+PROMPT_BLOCKS = {'on_message', 'on_message_edit', 'on_typing', 'on_raw_typing', 'on_presence_update', 'on_socket_event_type', 'on_socket_raw_receive'} # because they fire too frequently
+
+# [TODO]: Fully implement these below.
 @agent.tool()
-async def set_reminder(ctx: RunContext[Deps], prompt: str,
-                       at: Optional[datetime] = None,
-                       every_x_seconds: Optional[int] = None,
-                       cron: Optional[str] = None) -> str:
-
+async def set_automation(
+    ctx: RunContext[Deps],
+    name: str, action: Literal['prompt', 'code'], payload: str,
+    at: Optional[datetime] = None, every_x_seconds: Optional[int] = None,
+    cron: Optional[str] = None, event: Optional[str] = None,
+    channel_id: Optional[int] = None) -> str:
     """
-    This tool allows you to schedule yourself to be reminded (re-prompted) about something in this channel later.
+    Schedule yourself to be triggered later by TIME or by a Discord EVENT, running either a
+    prompt (re-prompt yourself) or code (runs without an LLM call, it's more efficient, use for deterministic tasks).
 
-    Provide one of the following:
-        - `at` - a datetime for a reminder that executes once at a specific time.
-        - `every_x_seconds` - repeat this reminder every X seconds. Try not to set anything under 300 for this value, or you will burn unnecessary tokens.
-        - `cron` - a 5-field crontab string, e.g. `0 9 * * 1` (09:00 each Monday)
+    Exactly ONE trigger:
+      - at / every_x_seconds / cron  (time)
+      - event  (a discord.py event name, e.g. `on_member_join`, `on_member_remove`)
 
-    `prompt` is what you wanna remind yourself of on each fire.
+    action:
+      - 'prompt': `payload` is text you'll be re-prompted with. (Prompt actions aren't allowed on events that occur frequently like `on_message` - too costly.)
+      - 'code':   `payload` is Python:  `async def main(event, discord, client): ...`
+        `event` is the discord event's args tuple (e.g. `(member,)` for `on_member_join`), or
+        `None` for time triggers. Don't react to your client's own events to avoid loops.
+
+    `name` identifies the automation for list_automations / cancel_automation. It's basically an ID.
     """
 
-    if not ctx.deps.scheduler or not ctx.deps.message:
-        logger.warning("Reminders aren't available, but agent tried to call them.")
-        return "Reminders are not available."
-    
+    if action not in ('prompt', 'code'): return "Action must be 'prompt' or 'code'."
+
+    triggers = [t for t in (at, every_x_seconds, cron, event) if t is not None]
+    if len(triggers) != 1: return "You have to provide exactly **ONE** trigger: `at`, `every_x_seconds`, `cron`, `event`."
+
+    author_id = ctx.deps.author_id or (ctx.deps.message.author.id if ctx.deps.message else None)
+    guild_id  = ctx.deps.guild_id or (ctx.deps.message.guild.id if (ctx.deps.message and ctx.deps.message.guild) else None)
+    channel   = channel_id or (ctx.deps.message.channel.id if ctx.deps.message else None)
+    if author_id is None:
+        return "Can't set an automation without a user to be in charge."
+
+    if event is not None:
+        ev = event if event.startswith('on_') else f'on_{event}'
+        bare = ev[3:]
+        if action == 'prompt' and ev in PROMPT_BLOCKS:
+            return f"You can't call yourself '{ev}' because it's too costly and frequent. But you can use `code` action with '{ev}'."
+
+        if not ctx.deps.client: return "Automations are not available for some reason."
+
+        ok = ctx.deps.client.register_event_automation({"name": name, "event": bare, "action": action, "payload": payload, "channel_id": channel, "author_id": author_id, "guild_id": guild_id})
+
+        return (f"Event automation '{name}' registered for {ev} (action={action})." if ok else f"An automation named '{name}' already exists. Cancel it first.")
+
+    if not ctx.deps.scheduler:
+        return "Automations are not available for some reason."
+
     try:
-        rid = ctx.deps.scheduler.add(
-            ctx.deps.message.channel.id,
-            ctx.deps.author_id or ctx.deps.message.author.id,
-            ctx.deps.guild_id or (ctx.deps.message.guild.id if ctx.deps.message.guild else 0),
-            prompt, at=at, every_x_seconds=every_x_seconds, cron=cron,
-        )
-    except ValueError as e:
-        logger.warning("Failed to set reminder: %s", e)
-        return f"Could not set reminder: {e}"
+        rid = ctx.deps.scheduler.add(action, payload, channel, author_id, guild_id, at=at, every_x_seconds=every_x_seconds, cron=cron, name=name)
+    except Exception as e:
+        logger.warning("Failed to set automation: %s", e, exc_info=e)
+        return f"Could not set automation: {e}"
 
-    return f"Reminder scheduled (ID: {rid})."
+    return f"Automation '{rid}' scheduled (action={action})."
+    
 
 @agent.tool()
-async def cancel_reminder(ctx: RunContext[Deps], reminder_id: str) -> str:
-    """Cancel a scheduled reminder by its ID."""
+async def cancel_automation(ctx: RunContext[Deps], name: str) -> str:
+    """Cancel an automation by name."""
+    cancelled = False
+    if ctx.deps.scheduler and ctx.deps.scheduler.cancel(name):
+        cancelled = True
+    if ctx.deps.client and ctx.deps.client.unregister_event_automation(name):
+        cancelled = True
+    return "Cancelled." if cancelled else f"No automation named '{name}'."
 
-    if not ctx.deps.scheduler:
-        logger.warning("Reminders aren't available, but agent tried to call them.")
-        return "Reminders are not available."
-    
-    return "Cancelled." if ctx.deps.scheduler.cancel(reminder_id) else "Reminder not found."
 
 @agent.tool()
-async def list_reminders(ctx: RunContext[Deps]) -> list:
-    """List all pending reminders."""
+async def list_automations(ctx: RunContext[Deps]) -> list:
+    """List all automations."""
+    out = []
+    if ctx.deps.scheduler:
+        out.extend(ctx.deps.scheduler.list_all())
+    if ctx.deps.client:
+        for bare, autos in ctx.deps.client.ev_automations.items():
+            for a in autos:
+                out.append({'id': a['name'], 'event': f"on_{bare}", 'action': a['action'], 'payload': a['payload'], 'channel_id': a['channel_id'], 'author_id': a['author_id']})
+    return out
 
-    if not ctx.deps.scheduler:
-        logger.warning("Reminders aren't available, but agent tried to call them.")
-        return []
-    
-    return ctx.deps.scheduler.list_all()
 
 @agent.tool()
 async def ban_user(ctx: RunContext[Deps], user_id: int, reason: str = '') -> str:
@@ -639,3 +665,89 @@ async def timeout_user(ctx: RunContext[Deps], user_id: int, seconds: int, reason
 async def cancel_timeout(ctx: RunContext[Deps], user_id: int) -> str:
     """Cancel a bot-access timeout early (see `timeout_user`). Doesn't cancel Discord server-wide timeouts, only timeouts on this bot."""
     return "Timeout cancelled." if moderation.cancel_timeout(ctx.deps.client.engine, user_id) else "That user is not timed out."
+
+@agent.tool()
+async def attach_file(ctx: RunContext[Deps], paths: list[str]) -> str:
+    """
+    Attach one (or more) files to your next reply in this channel.
+
+    Pass a list of file paths accessible in your environment.
+    After this tool returns, you can send your final message and the files will be uploaded to Discord.
+
+    You can call this tool multiple times, but there must never be more than **10** files (discord hard limit) and each file must be a maximum of 8MB.
+
+    You can only upload files in `/workspace` or `/tmp`.
+
+    Suggestion: If you want to provide the user with a large piece of code, it is **always** recommended to instead of putting it in a codeblock, use `write_file` to write it to a temporary path and upload it here, but only do so if you think the script is big enough that it won't fit in a single Discord response.
+    """
+
+    added, errors = [], []
+
+    for p in paths:
+        rp = Path(p).resolve()
+
+        if not any(str(rp) == r or str(rp).startswith(r + '/') for r in ATTACHMENT_SOURCES):
+            errors.append(f"{p}: must be in one of the following directories: {ATTACHMENT_SOURCES}")
+            continue
+        if not rp.is_file():
+            errors.append(f"{p}: not a file.")
+            continue
+        if (size := rp.stat().st_size) > ATTACHMENT_MAX_BYTES:
+            errors.append(f"{p}: exceeds max size of {ATTACHMENT_MAX_BYTES} bytes (file is {size} bytes)")
+            continue
+        if len(ctx.deps.attached_files) + len(added) >= ATTACHMENT_MAX_COUNT:
+            errors.append(f"{p}: attachment limit ({ATTACHMENT_MAX_COUNT}) reached")
+            continue
+
+        added.append(str(rp))
+    ctx.deps.attached_files.extend(added)
+    msg = f"Attached {len(added)} files: {[Path(a).name for a in added]}. You can now send a final message, or keep working (but these files will be attached on your final message)."
+    if errors: msg += f"\nSkipped: {errors}"
+    return msg
+
+def _sup(ctx):
+    return getattr(ctx.deps.client, 'supervisor', None) if ctx.deps.client else None
+
+@agent.tool()
+async def create_service(ctx: RunContext[Deps], name: str, command: list[str], cwd: Optional[str] = None, env: Optional[dict] = None, autorestart: bool = True) -> str:
+    """
+    Create and start a persistent background service that survives reboots (systemd-lite).
+
+    Write your script file(s) first (e.g. with write_file), then register how to run them here.
+    `command` = binary + args, e.g. ["python", "/workspace/services/giveaway_bot.py"].
+    You can run your own Discord bot: os.getenv("DISCORD_TOKEN") is available in the environment.
+    The manifest is stored as YAML at /workspace/services/{name}.yaml. Services auto-restart on
+    crash unless they crash-loop (3 quick crashes) - then fix the bug and call `restart_service`.
+    """
+    sup = _sup(ctx)
+    return await sup.create(name, command, cwd=cwd, env=env, autorestart=autorestart) if sup else "Services are not available."
+
+@agent.tool()
+async def list_services(ctx: RunContext[Deps]) -> list:
+    """List all registered services and their status."""
+    sup = _sup(ctx)
+    return sup.list_all() if sup else []
+
+@agent.tool()
+async def service_status(ctx: RunContext[Deps], name: str) -> dict:
+    """Detailed status + recent log tail for one service."""
+    sup = _sup(ctx)
+    return sup.status(name) if sup else {'error': 'Services are not available.'}
+
+@agent.tool()
+async def stop_service(ctx: RunContext[Deps], name: str) -> str:
+    """Stop a service and keep it stopped across reboots."""
+    sup = _sup(ctx)
+    return await sup.stop_service(name) if sup else "Services are not available."
+
+@agent.tool()
+async def restart_service(ctx: RunContext[Deps], name: str) -> str:
+    """Restart a service (also clears crash-loop state, e.g. after you fixed a bug)."""
+    sup = _sup(ctx)
+    return await sup.restart_service(name) if sup else "Services are not available."
+
+@agent.tool()
+async def remove_service(ctx: RunContext[Deps], name: str) -> str:
+    """Stop and permanently remove a service (deletes its manifest)."""
+    sup = _sup(ctx)
+    return await sup.remove(name) if sup else "Services are not available."

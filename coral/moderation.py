@@ -6,11 +6,10 @@ from typing import Optional
 import logging
 
 from .history import Moderation
+from .utils import now
 
 logger = logging.getLogger(__name__)
 
-# util
-def now() -> datetime: return datetime.now(timezone.utc) # [TODO]: Put this into @utils.py
 
 def is_blocked(engine: Engine, user_id: int) -> tuple[bool, Optional[str]]: # [blocked?, reason]
     with Session(engine) as session:

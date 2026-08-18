@@ -1,38 +1,87 @@
-def chunk_string(s: str, size: int = 2000):
-    return [s[i:i+size] for i in range(0, len(s), size)]
+import discord
+import re, asyncio
+from io import StringIO
+from contextlib import redirect_stdout, redirect_stderr
+from datetime import datetime, timezone
+import logging
+import tempfile, os
 
-import re as _re
+logger = logging.getLogger(__name__)
 
-_MASS_MENTION_RE = _re.compile(r'@(everyone|here)')
+def now() -> datetime: return datetime.now(timezone.utc)
+
+_CODEBLOCK = re.compile(r'```([\w+.\-]*)\n(.*?)```', re.DOTALL)
+_EXT_BY_LANG = {
+    'python': 'py', 'py': 'py', 'js': 'js', 'javascript': 'js', 'ts': 'ts', 'typescript': 'ts',
+    'json': 'json', 'yaml': 'yaml', 'yml': 'yml', 'sh': 'sh', 'bash': 'sh', 'html': 'html',
+    'css': 'css', 'sql': 'sql', 'c': 'c', 'cpp': 'cpp', 'java': 'java', 'go': 'go',
+    'rust': 'rs', 'rs': 'rs', 'md': 'md', 'xml': 'xml', 'markdown': 'md', '': 'txt',
+}
+
+def extract_large_codeblocks(text: str, size: int = 2000):
+    files = []
+    def repl(m):
+        block = m.group(0)
+        if len(block) <= size:
+            return block
+        lang = (m.group(1) or '').lower()
+        fd, path = tempfile.mkstemp(suffix=f".{_EXT_BY_LANG.get(lang, 'txt')}", prefix='coral_code_', dir='/tmp')
+        with os.fdopen(fd, 'w') as f:
+            f.write(m.group(2))
+        files.append(path)
+        return f"[{lang} code attached]"
+    return _CODEBLOCK.sub(repl, text), files
+
+
+def _split_long_line(text: str, size: int) -> list[str]:
+    out = []
+
+    while len(text) > size:
+        cut = text.rfind(' ', 1, size)
+        if cut == -1:
+            out.append(text[:size])
+            text = text[size:]
+        else:
+            out.append(text[:cut])
+            text = text[cut + 1:]
+
+    if text: out.append(text)
+
+    return out
+
+def chunk_string(s: str, size: int = 2000) -> list[str]:
+    if len(s) <= size: return [s]
+
+    chunks: list[str] = []
+    current = ""
+
+    for line in s.splitlines(keepends=True):
+        if len(line) > size:
+            if current:
+                chunks.append(current)
+                current = ""
+            chunks.extend(_split_long_line(line, size))
+            continue
+
+        if len(current) + len(line) > size:
+            chunks.append(current)
+            current = line
+        else:
+            current += line
+
+    if current:
+        chunks.append(current)
+
+    return chunks
+
+_MASS_MENTION_RE = re.compile(r'@(everyone|here)')
 
 def neutralize_mass_mentions(text: str) -> str:
-    """
-    Hard-strip `@everyone` / `@here` mass mentions from outgoing text by removing
-    the leading `@`, turning them into the harmless words `everyone` / `here`.
-    """
     return _MASS_MENTION_RE.sub(r'\1', text)
 
-_ROLE_MENTION_RE = _re.compile(r'<@&([0-9]{15,20})>')
+_ROLE_MENTION_RE = re.compile(r'<@&([0-9]{15,20})>')
 
 def sanitize_role_mentions(text: str, guild, channel, member, allow_everyone: bool = False):
-    """
-    For each role mention (`<@&id>`) in outgoing text, keep it as a real ping only
-    if `member` (the user who triggered the bot) is actually allowed to ping that
-    role in `channel`; otherwise replace it with the plain-text role name (e.g.
-    `<@&1088558118113378434>` -> `@Member`).
-
-    The `@everyone` role shares its id with the guild id, so `<@&guild_id>` is a
-    mass mention in disguise; it is governed by `allow_everyone` (and stripped to
-    plain `everyone` when not allowed) rather than the per-role logic.
-
-    A user may ping a normal role when the role is `mentionable`, or when the user
-    has the "Mention @everyone, @here, and All Roles" permission in that channel
-    (which Administrator implies).
-
-    Returns `(sanitized_text, allowed_role_objects)`. `allowed_role_objects` is the
-    list of roles that were kept as real pings, suitable for passing straight to
-    `discord.AllowedMentions(roles=...)` as a hard, API-level safety net.
-    """
     if guild is None or member is None:
         return text, []
 
@@ -47,12 +96,8 @@ def sanitize_role_mentions(text: str, guild, channel, member, allow_everyone: bo
         rid = int(match.group(1))
         role = guild.get_role(rid)
         if role is None:
-            # Unknown/deleted role won't ping anyone real; leave untouched.
             return match.group(0)
 
-        # The @everyone role is a mass mention; never let it fall through to the
-        # `@{name}` path (its name is literally "@everyone", which would recreate a
-        # live ping). It is controlled solely by `allow_everyone`.
         if rid == guild.id or getattr(role, 'is_default', lambda: False)():
             if allow_everyone:
                 return match.group(0)
@@ -66,13 +111,44 @@ def sanitize_role_mentions(text: str, guild, channel, member, allow_everyone: bo
     return _ROLE_MENTION_RE.sub(repl, text), allowed_roles
 
 
-
 def indent(text, spaces):
     prefix = " " * spaces
     return '\n'.join(prefix + line for line in text.splitlines())
 
-import discord
-import re
+async def run_code(code: str, header: str, args: tuple, timeout: int) -> dict:
+    warnings = []
+    if not re.search(r'(?m)^' + re.escape(header), code):
+        warnings.append(f"Your code didn't define `{header}` at the top level, so the system wrapped it for you.")
+        code = f"{header}\n{indent(code, 4)}"
+
+    ns = { '__builtins__': __builtins__ }
+    out, err = StringIO(), StringIO()
+
+    logger.debug("Agent attempted to run code:")
+    logger.debug('\n' + code)
+    logger.debug("Running...")
+
+    stdout, stderr = '', ''
+    try:
+        with redirect_stdout(out), redirect_stderr(err):
+            exec(code, ns)
+            result = await asyncio.wait_for(ns['main'](*args), timeout = timeout)
+
+        stdout = out.getvalue()
+        stderr = err.getvalue()
+
+        logger.debug("Result: %s", result)
+        logger.debug(stdout + stderr)
+
+        return {'warnings': warnings, 'result': result, 'stdout': stdout, 'stderr': stderr}
+    except asyncio.TimeoutError:
+        logger.debug("Execution timed out.")
+        return {'warnings': warnings, 'result': 'Execution timed out.', 'stdout': stdout, 'stderr': stderr}
+    except Exception as e:
+        import traceback
+        logger.debug(traceback.format_exc(), exc_info=e)
+        return {'warnings': warnings, 'result': traceback.format_exc(), 'stdout': stdout, 'stderr': stderr}
+    
 
 def clean(message: discord.Message):
     if message.guild:

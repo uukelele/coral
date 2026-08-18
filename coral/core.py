@@ -63,6 +63,7 @@ def main():
     )
 
     token = config.DISCORD_TOKEN or os.getenv('DISCORD_TOKEN')
+    if token: os.environ['DISCORD_TOKEN'] = token
 
     if not token:
         logger.critical("DISCORD_TOKEN not found in config or environment variables. Please set it and rerun the command.")

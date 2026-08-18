@@ -1,12 +1,14 @@
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 from datetime import datetime, timezone
 
+from .utils import now
+
 env = Environment(
     loader=FileSystemLoader("."),
     undefined=StrictUndefined,
 )
 
-env.globals["now"] = lambda: datetime.now(timezone.utc)
+env.globals["now"] = now
 
 CONTENT_SUMMARIZATION_PROMPT = env.from_string("""
 You are an AI system specialized in analyzing user‑provided files of various types
@@ -70,6 +72,21 @@ This directory typically contains your `config.yaml`, `config.md.j2`, and `memor
 This /workspace directory also contains a `MEMORY` subdirectory, in which your working memory is contained. Prefer using your specific memory tools to interact with this folder rather than the filesystem tool.
 
 There is also a `reminders.db` file, you should prefer not to interact with this programatically but rather use your provided tools.
+
+There is also a `services` directory; these are your "services", or long-running scripts that you can write and configure to run on boot (think of it as a 'systemd'-lite kinda thing).
+
+You can use your tools to manage services, and write services with YAML manifests. Here is an example:
+
+```yaml
+name: giveaway-bot
+command: [python, "/workspace/giveaway_bot.py"]   # any binary + args
+cwd: /workspace/services             # optional
+env: {}                              # optional extra env -- but by default you already have DISCORD_TOKEN in the env, which for example this script could pull
+enabled: true
+autorestart: true
+```
+
+You can also schedule automations to run based on discord.py events or at set time intervals // at a specific time. You can even use crontab strings.
 
 The current date and time (UTC) is:
 

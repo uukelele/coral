@@ -8,7 +8,10 @@ from apscheduler.job import Job
 
 from datetime import datetime
 import logging, typing
-from typing import Optional
+from typing import Optional, Literal
+import discord
+
+from . import moderation, utils
 
 if typing.TYPE_CHECKING:
     from .bot import CoralBot
@@ -19,27 +22,37 @@ REMINDERS_DB = 'sqlite:////workspace/reminders.db'
 
 _bot: 'CoralBot' = None
 
-async def _fire(channel_id: int, author_id: int, guild_id: int, prompt: str):
-    bot = _bot
+async def fire_automation(bot: 'CoralBot', action: Literal['code', 'prompt'], payload: str, channel_id: Optional[int], author_id: int, guild_id: Optional[int], event_args: tuple):
+    if moderation.is_blocked(bot.engine, author_id)[0]: return
 
-    if bot is None: return
+    channel = bot.get_channel(channel_id) if channel_id else None
+    guild   = bot.get_guild(guild_id) if guild_id else None
+    member  = guild.get_member(author_id) if guild else None
 
-    channel = bot.get_channel(channel_id)
-    guild = bot.get_guild(guild_id) if guild_id else None
-    member = guild.get_member(author_id) if guild else None
+    match action:
+        case 'prompt':
+            if not (channel and member): return
 
-    if not (channel and member):
-        logger.warning("Reminder skipped: channel/member MISSING! (%s/%s)", channel_id, author_id)
-        return
+            allowed, tier = bot._may_chat(member)
+            if not allowed: return
 
-    allowed, tier = bot._may_chat(member)
-    if not allowed: return
+            label = 'Scheduled task' if event_args is None else 'Event automation'
+            await bot._respond_in_channel(
+                channel,
+                [f"{label} (set by {member.name}): {payload}"],
+                tier = tier, author = member, message = None, footer = False,
+            )
+        case 'code':
+            res = await utils.run_code(
+                payload,
+                'async def main(event, discord, client):', (event_args, discord, bot),
+                timeout = 60,
+            )
+            if res.get('stderr') or (isinstance(res.get('result'), str) and 'Traceback' in res['result']):
+                logger.warning("Automation code error: %s\n%s", res.get('result'), res.get('stderr'))
 
-    await bot._respond_in_channel(
-        channel,
-        [f"Scheduled task (set by {member.name}): {prompt}"],
-        tier = tier, author = member, message = None, footer = False,
-    )
+async def _fire(action: Literal['code', 'prompt'], payload: str, channel_id: int, author_id: int, guild_id: int):
+    if _bot: await fire_automation(_bot, action, payload, channel_id, author_id, guild_id, event_args=None)
 
 class Scheduler:
     def __init__(self, bot, db_url: str = REMINDERS_DB):
@@ -55,10 +68,11 @@ class Scheduler:
         self.scheduler.start()
 
     def add(
-        self, channel_id, author_id, guild_id, prompt, *,
+        self, action: Literal['prompt', 'code'], payload: str, channel_id: Optional[int], author_id: int, guild_id: Optional[int], *,
         at: Optional[datetime] = None,
         every_x_seconds: Optional[int] = None,
         cron: Optional[str] = None,
+        name: Optional[str] = None,
     ) -> str:
         chosen = [x for x in (at, every_x_seconds, cron) if x is not None]
         if len(chosen) != 1:
@@ -72,7 +86,7 @@ class Scheduler:
             trigger = CronTrigger.from_crontab(cron)
 
         job = self.scheduler.add_job(
-            _fire, args = [ channel_id, author_id, guild_id, prompt ],
+            _fire, args = [ action, payload, channel_id, author_id, guild_id ], id=name,
             trigger=trigger, misfire_grace_time=3600, coalesce=True,
         )
         return job.id
@@ -90,9 +104,11 @@ class Scheduler:
             {
                 'id': j.id,
                 'next_run': str(j.next_run_time),
-                'channel_id': j.args[0],
-                'prompt': j.args[3],
-                'author_id': j.args[1],
+                'action': j.args[0],
+                'payload': j.args[1],
+                'channel_id': j.args[2],
+                'author_id': j.args[3],
+                'guild_id': j.args[4],
             }
             for j in jobs
         ]
