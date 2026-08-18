@@ -2,7 +2,7 @@ import pydantic_ai
 import pydantic_core
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.capabilities import PrepareTools, Thinking, WebSearch, WebFetch, Hooks
-from pydantic_ai_harness import Coder, Memory, ToolGuardrail, GuardrailResult, TieredCompaction, ClearToolResults, SummarizingCompaction
+from pydantic_ai_harness import Coder, Memory, ToolGuardrail, GuardrailResult, TieredCompaction, ClearToolResults, SummarizingCompaction, ClampOversizedMessages, ReportContextUsage
 from pydantic_ai_harness.guardrails import ToolCallInfo
 from pydantic_ai_harness.memory import FileStore
 from pydantic_ai.tools import ToolDefinition
@@ -113,11 +113,13 @@ agent = Agent(
     capabilities = [
         TieredCompaction(
             tiers = [
+                ClampOversizedMessages(40_000),
                 ClearToolResults(max_tokens=1, keep_pairs=5),
                 SummarizingCompaction(max_messages=1, keep_messages=25)
             ],
             target_tokens = 200_000, # should be enough for 256k models
         ),
+        ReportContextUsage(on_usage = lambda u : logger.debug("Context: %s tok / %s window (resolved=%s, %.0f%%)", u.used_tokens, u.window_tokens, u.resolved, u.fraction * 100)),
         PrepareTools(annotate_unavailable_tools),
         ToolGuardrail(guard=block_unauthorized),
         Thinking(),
