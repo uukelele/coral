@@ -419,7 +419,7 @@ async def main(message, discord, client):
     try:
         with redirect_stdout(stdout_buffer), redirect_stderr(stderr_buffer):
             exec(code, ns)
-            func = locals['main']
+            func = ns['main']
 
             result = await asyncio.wait_for(
                 func(ctx.deps.message, discord, ctx.deps.client),
