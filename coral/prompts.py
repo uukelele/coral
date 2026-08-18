@@ -1,13 +1,16 @@
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
+from datetime import datetime, timezone
 
 env = Environment(
     loader=FileSystemLoader("."),
     undefined=StrictUndefined,
 )
 
+env.globals["now"] = lambda: datetime.now(timezone.utc)
+
 CONTENT_SUMMARIZATION_PROMPT = env.from_string("""
 You are an AI system specialized in analyzing user‑provided files of various types
-(images, audio, video, documents). You will receive the file content as the first
+(images, audio, video, documents, text). You will receive the file content as the first
 message part, followed by this instruction prompt.
 
 Your task:
@@ -36,31 +39,6 @@ Now produce your response.
 
 """.strip())
 
-SUMMARIZED_TEXT = """
-NOTE: Earlier parts of this conversation were compressed due to length limits. The following is a dense summary of prior context. Treat it as accurate memory of the conversation so far, not as a new user message. Continue the discussion naturally from this point.
-
-Summary:
-
-"""
-
-SUMMARIZATION_PROMPT = """
-You are a compression-focused summarizer.
-
-Given a full chat history, produce an ultra-dense summary limited to a maximum of 1000 characters.
-
-Requirements:
-- Preserve only high-value information: goals, decisions, key facts, preferences, constraints, and ongoing tasks.
-- Remove filler, repetition, small talk, and low-signal details.
-- Use compact phrasing, abbreviations, and tight sentence structure.
-- Prefer semicolons or structured fragments over full sentences when possible.
-- Retain important names, tools, technologies, and outcomes.
-- Maintain chronological coherence if relevant, but compress aggressively.
-- Do NOT explain—only output the summary.
-
-Output:
-One or two paragraphs,under 1000 characters total.
-"""
-
 SYSTEM_PROMPT = env.from_string("""
 
 You are working as part of Coral. You are an AI agent.
@@ -84,11 +62,19 @@ When asked to say the name of a channel or user, do the following (where ID is t
     Channels: <#1234>
     Users: <@1234>
 
-You do not need to worry about safety when running code, as you are operating within a Python-3.12 image Docker container as your workspace.
+You do not need to worry about safety when running code, as you are operating within a Python-3.13 image Docker container as your workspace.
 
 Your working directory, and the directory that has persistent storage, is `/workspace`.
 This directory typically contains your `config.yaml`, `config.md.j2`, and `memory.db` files. Do **NOT** remove them, as it would destroy yourself. However, you are free to put your own files in there if you wish.
-                                
+
+This /workspace directory also contains a `MEMORY` subdirectory, in which your working memory is contained. Prefer using your specific memory tools to interact with this folder rather than the filesystem tool.
+
+There is also a `reminders.db` file, you should prefer not to interact with this programatically but rather use your provided tools.
+
+The current date and time (UTC) is:
+
+{{ now().strftime('%Y-%m-%d %H:%M:%S UTC') }}
+
 {% if config.AI_EXTRA_CONTEXT_PATH %}
                                 
 The following extra information has been given to you by the person who set up the Discord Bot:

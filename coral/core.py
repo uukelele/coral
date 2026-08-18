@@ -1,14 +1,21 @@
 import discord
 import os
 
-import typer
+import typer, logging
 
 from .config import load_config
 from .bot import CoralBot
 from .history import init_db
 from .agent import agent
+from . import log
+
+logger = logging.getLogger(__name__)
 
 def main():
+    log.setup()
+
+    logger.info("Coral is initializing!")
+
     config = load_config()
 
     from pydantic_ai import ModelSettings
@@ -58,7 +65,7 @@ def main():
     token = config.DISCORD_TOKEN or os.getenv('DISCORD_TOKEN')
 
     if not token:
-        typer.secho("DISCORD_TOKEN not found in config or environment variables. Please set it and rerun the command.", fg='red')
+        logger.critical("DISCORD_TOKEN not found in config or environment variables. Please set it and rerun the command.")
         typer.Exit(1)
 
     client.run(token)

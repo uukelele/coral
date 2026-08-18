@@ -3,11 +3,27 @@ from pathlib import Path
 import yaml
 import os
 import subprocess as sp
+import logging
 
-from .config import load_config, Config, Tier
+from .config import load_config, Config, Tier, TOOL_GROUPS
 from .prompts import DEFAULT_EXTRA_PROMPT
+from . import log
 
 app = typer.Typer()
+
+logger = logging.getLogger(__name__)
+
+@app.callback()
+def main(
+    ctx: typer.Context,
+    quiet: bool = typer.Option(
+        False,
+        "--quiet",
+        "-q",
+        help="Disable verbose output.",
+    ),
+):
+    log.setup(not quiet)
 
 @app.command(name='create-docker')
 def create_dockerfiles(path: Path = typer.Argument(Path('.')), force=False):
@@ -59,11 +75,13 @@ services:
 """
         
     if not p_dockerfile.exists():
-        typer.secho("[+] Writing Dockerfile...")
+        logger.debug("Writing %s...", "Dockerfile")
+        # typer.secho("[+] Writing Dockerfile...")
         p_dockerfile.write_text(dockerfile)
 
     if not p_compose.exists():
-        typer.secho("[+] Writing docker-compose.yml...")
+        logger.debug("Writing %s...", "docker-compose.yml")
+        # typer.secho("[+] Writing docker-compose.yml...")
         p_compose.write_text(compose)
 
 
@@ -80,11 +98,13 @@ def create(path: Path = typer.Argument(Path('.'))):
             path.is_dir() and not any(path.iterdir())
         )
     ):
-        typer.secho(f"Path {path} must be an empty folder.", fg='red')
+        logger.error("Path %s must be an empty folder.", str(path))
+        # typer.secho(f"Path {path} must be an empty folder.", fg='red')
         raise typer.Exit(1)
     
     if not path.exists():
-        typer.secho(f"[+] Creating directory {path}...", fg='green')
+        logger.debug("Creating directory %s...", str(path))
+        # typer.secho(f"[+] Creating directory {path}...", fg='green')
         path.mkdir(parents=True, exist_ok=True)
 
     name = path.name
@@ -93,25 +113,16 @@ def create(path: Path = typer.Argument(Path('.'))):
         DISCORD_TOKEN  = "Paste your Discord token here.",
         DISCORD_PREFIX = '--',
 
-        # Tiered access control. Tiers are ranked top-to-bottom (the first tier is
-        # the highest rank); a user gets the highest tier they match. `allowed_tools`
-        # accepts tool names or "*" for every tool, and defaults to none. `allow_chat`
-        # controls whether the tier may talk to the bot at all and defaults to true.
-        # The `default` tier applies to everyone who matches no other tier.
-        #
-        # Available tools: duckduckgo_search, search_discord, get_user_info,
-        # run_shell, run_code, analyse_file, trigger_reboot.
-        #
-        # (Legacy `DISCORD_ALLOWED_USER_OR_ROLE_IDS` is still supported if you prefer
-        #  the old single allow-list; leave `tiers` unset to use it instead.)
-        tiers = {
+        TIERS = {
             'admin': Tier(
-                allowed_roles_or_user_ids = [123456789012345678],
+                allowed_roles_or_user_ids = [1234],
                 allowed_tools = ['*'],
+                ratelimit = None,
             ),
             'default': Tier(
-                allowed_tools = [],
+                allowed_tools = ['@memory', '@discord', '@web', '@media'],
                 allow_chat = True,
+                ratelimit = '6/m'
             ),
         },
 
@@ -124,12 +135,33 @@ def create(path: Path = typer.Argument(Path('.'))):
         DB_PATH = 'sqlite:///memory.db',
     )
 
-    (path / 'config.yaml').write_text(yaml.dump(base_config.model_dump(mode='json')))
+    config = yaml.dump(base_config.model_dump(mode='json'), sort_keys=False)
+
+    auto_lines = ["These are the available tools that you can write:"]
+    for group, tools in TOOL_GROUPS.items():
+        auto_lines.append(f'  @{group} --------------')
+        for tool in tools:
+            auto_lines.append(f'    > {tool}')
+        auto_lines.append('')
+
+    auto_lines += ['', '', 'You can also do things like ["*", "!search_discord"], or ["@web", "!web_fetch"], or even ["*", "!@media"], or even ["!*", "get_user_info"]']
+    comment = "\n".join(f"# {l}" for l in auto_lines)
+
+
+    out = []
+    for line in config.splitlines():
+        if line.startswith("TIERS:"):
+            out.append(comment)
+        out.append(line)
+
+    config = '\n'.join(out)
+
+    (path / 'config.yaml').write_text(config)
     (path / 'config.md.j2').write_text(DEFAULT_EXTRA_PROMPT.render(path=path))
 
     create_dockerfiles(path)
 
-    typer.secho(f"[+] Success! All set up! Now go and customize your bot!", fg='green')
+    logger.info(f"Success! All set up! Now go and customize your bot!")
 
 @app.command()
 def clear(path: Path = typer.Argument(Path('.'))):
@@ -142,7 +174,7 @@ def clear(path: Path = typer.Argument(Path('.'))):
     parsed = urlparse(config.DB_PATH)
 
     if parsed.scheme != 'sqlite':
-        typer.secho('The database is not a SQLite .db file. Coral cannot find the database path to clear.', fg='red')
+        logger.error('The database is not a SQLite .db file. Coral cannot find the database path to clear.')
         raise typer.Exit(1)
 
     db_path: Path
@@ -158,12 +190,18 @@ def clear(path: Path = typer.Argument(Path('.'))):
 
     if confirm:
         db_path.unlink()
-        typer.secho("Memory cleared successfully.", fg='green')
+        logger.info("Memory cleared successfully.")
+
+    reminders = path / 'reminders.db'
+    if reminders.exists():
+        if (input(f"Clear reminders at {reminders}? [y/N]: ").strip().lower() or 'n')[0] == 'y':
+            reminders.unlink()
+            logger.info("Reminders cleared successfully.")
 
     if (path / 'docker-compose.yml').exists():
-        typer.secho("Shutting down and removing container...")
+        logger.debug("Shutting down and removing container...")
         sp.run(['docker', 'compose', 'down', '-v'])
-        typer.secho("Workspace cleared.", fg='green')
+        logger.info("Workspace cleared.")
 
 
 @app.command()
@@ -172,14 +210,14 @@ def run(path: Path = typer.Argument(Path('.'))):
 
     create_dockerfiles(path)
 
-    typer.secho("Booting Coral...", fg='white')
+    logger.info("Booting Coral...")
     
     try:
         sp.run(['docker', 'compose', 'up', '--build'])
     except KeyboardInterrupt:
-        typer.secho('\nStopping workspace...', fg='red')
+        logger.error('\nStopping workspace...')
         sp.run(["docker", "compose", "stop"])
-        typer.secho("Stopped.", fg='white')
+        logger.info("Stopped.")
 
     
 

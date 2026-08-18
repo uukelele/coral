@@ -1,44 +1,91 @@
 from pydantic import BaseModel
 from pathlib import Path
 from typing import *
-import yaml
+import yaml, logging, re
 
+logger = logging.getLogger(__name__)
+
+TOOL_GROUPS = {
+    'web':            ['duckduckgo_search', 'web_fetch'],
+    'media':          ['analyse_file'],
+    'discord':        ['get_user_info'],
+    'discord:admin':  ['search_discord'], # this is in the `discord:admin` group as search_discord can access even hidden/private/admin channels which we don't always want to expose
+    'planning':       ['write_plan', 'read_plan', 'add_task', 'update_task_status', 'update_task_statuses', 'remove_task', 'add_subtask', 'set_dependency', 'get_available_tasks', 'delegate_task'],
+    'coder':          [
+                        'read_file', 'write_file', 'edit_file', 'list_directory', 'search_files', 'find_files', 'create_directory', 'file_info', # filesystem
+                        'run_command', 'start_command', 'check_command', 'stop_command', 'run_shell', 'run_code', 'trigger_reboot', # code execution
+                      ],
+    'memory':         [
+                        'set_reminder', 'cancel_reminder', 'list_reminders', # reminders
+                        'read_memory', 'write_memory', 'search_memory', 'delete_memory', # memory
+                      ],
+    'moderation':     ['timeout_user', 'ban_user', 'unban_user', 'cancel_timeout'],
+}
+
+_UNITS = {
+    'seconds': 1, 'second': 1, 'secs': 1, 'sec': 1, 's': 1,
+    'minutes': 60, 'minute': 60, 'mins': 60, 'min': 60, 'm': 60,
+    'hours': 3600, 'hour': 3600, 'hrs': 3600, 'hr': 3600, 'h': 3600,
+    'days': 86400, 'day': 86400, 'd': 86400,
+}
+
+def parse_limit(limit: str) -> tuple[int, int]:
+    if not isinstance(limit, str):
+        raise ValueError(f"Invalid rate limit: {limit!r}")
+
+    count_part, sep, period = limit.replace(' per ', '/').partition('/')
+    if not sep:
+        raise ValueError(f"Invalid rate limit: {limit!r} (expected a form like '5/m' or '10 per 30s')")
+
+    try:
+        count = int(count_part.strip())
+    except ValueError:
+        raise ValueError(f"Invalid rate limit count: {count_part.strip()!r}") from None
+
+    match = re.fullmatch(r'(\d+)?\s*([a-z]+)', period.strip().lower())
+    if not match:
+        raise ValueError(f"Invalid rate limit period: {period.strip()!r}")
+
+    multiplier = int(match.group(1) or 1)
+    unit = match.group(2)
+    if unit not in _UNITS:
+        raise ValueError(f"Invalid rate limit unit: {unit!r} (expected one of s, m, h, d or their full names)")
+
+    return count, multiplier * _UNITS[unit]
 
 class Tier(BaseModel):
-    """
-    A single permission tier.
-
-    - `allowed_roles_or_user_ids`: the user IDs and/or role IDs that belong to this
-      tier. A user belongs to a tier if their own ID, or any of their role IDs, is
-      present in this list. This is not required for the special `default` tier,
-      which acts as the fallback for anyone who does not match any other tier.
-    - `allowed_tools`: the list of tool names this tier may use. Defaults to an empty
-      list (no tools). The special value `"*"` allows every tool.
-    - `allow_chat`: whether members of this tier may talk to the bot at all.
-      Defaults to `True`.
-    - `allow_ping_everyone`: whether the bot is allowed to emit `@everyone` /
-      `@here` mass-pings in responses triggered by this tier. Defaults to `False`;
-      when off, those tokens are hard-replaced with plain `everyone` / `here`.
-    """
-
     allowed_roles_or_user_ids: Optional[List[int]] = None
     allowed_tools: List[str] = []
     allow_chat: bool = True
     allow_ping_everyone: bool = False
+    ratelimit: Optional[str] = '6/m'
 
     def can_use_tool(self, tool_name: str) -> bool:
-        return '*' in self.allowed_tools or tool_name in self.allowed_tools
+        kanuze = False # kanuze = can use. get it? no? ok..
+
+        for rule in self.allowed_tools:
+            neg = rule.startswith('!')
+            body = rule[1:] if neg else rule
+            if body == '*': # wildcard, match all
+                match = True # don't return yet, there could be a neg of this underneath
+            elif body.startswith('@'): # group
+                match = tool_name in TOOL_GROUPS.get(body[1:], ())
+            else:
+                match = body == tool_name
+
+            if match:
+                kanuze = not neg
+
+        return kanuze
+
+    def parsed_ratelimit(self) -> Optional[tuple[int, int]]:
+        return parse_limit(self.ratelimit) if self.ratelimit else None
 
 
 class Config(BaseModel):
     DISCORD_TOKEN: Optional[str] = None
     DISCORD_PREFIX: str = '-- '
-    # Legacy allow-list. Still fully supported for backward compatibility.
-    # Ignored when `tiers` is configured.
-    DISCORD_ALLOWED_USER_OR_ROLE_IDS: Optional[List[int]] = None
-    # New tiered access control. Insertion order defines rank (highest first).
-    # The `default` tier (if present) is used for anyone matching no other tier.
-    tiers: Optional[Dict[str, Tier]] = None
+    TIERS: Optional[Dict[str, Tier]] = None
 
     AI_MODEL_NAME: str
     AI_API_KEY: Optional[str] = None
@@ -49,35 +96,25 @@ class Config(BaseModel):
 
     DB_PATH: str = 'sqlite:///memory.db'
 
-    def resolve_tier(self, user_id: int, role_ids: Optional[Iterable[int]] = None) -> Optional[Tier]:
-        """
-        Resolve the effective tier for a user given their user ID and role IDs.
-
-        Returns `None` when tiers are not configured, signalling that callers should
-        fall back to the legacy `DISCORD_ALLOWED_USER_OR_ROLE_IDS` behaviour.
-
-        When tiers are configured, the user is matched against each tier in order
-        (the first tier listed is the highest rank), and the highest matching tier
-        is returned. Users matching no tier receive the `default` tier if one is
-        defined, otherwise a permissive-chat / no-tools default.
-        """
-        if not self.tiers:
-            return None
+    def resolve_tier(self, user_id: int, role_ids: Optional[Iterable[int]] = None) -> Tier:
+        if not self.TIERS: return Tier()
 
         candidate_ids = {user_id, *(role_ids or [])}
 
-        for name, tier in self.tiers.items():
+        for name, tier in self.TIERS.items():
             if name == 'default':
                 continue
             ids = tier.allowed_roles_or_user_ids
             if ids and candidate_ids.intersection(ids):
                 return tier
 
-        return self.tiers.get('default') or Tier()
+        return self.TIERS.get('default') or Tier()
 
 
 
 def load_config(path: str | Path = 'config.yaml') -> Config:
+    logger.debug("Loading config from %s", path)
+
     path = Path(path)
 
     if not path.exists():
