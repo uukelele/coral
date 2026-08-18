@@ -1,4 +1,5 @@
 import pydantic_ai
+import pydantic_core
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.capabilities import PrepareTools, Thinking, WebSearch, WebFetch, Hooks
 from pydantic_ai_harness import Coder, Memory, ToolGuardrail, GuardrailResult, TieredCompaction, ClearToolResults, SummarizingCompaction
@@ -7,7 +8,7 @@ from pydantic_ai_harness.memory import FileStore
 from pydantic_ai.tools import ToolDefinition
 from pydantic_ai.models import Model
 from pydantic_ai.exceptions import ModelAPIError
-from pydantic_ai.messages import TextPart, ToolCallPart
+from pydantic_ai.messages import TextPart, ToolCallPart, RetryPromptPart
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from typing import *
 from datetime import datetime
@@ -67,6 +68,20 @@ async def block_unauthorized(ctx: RunContext[Deps], call: ToolCallInfo) -> Guard
         return GuardrailResult.block(f"Tool unavailable: {reason}")
     return GuardrailResult.allow()
 
+def json_safe_input(value):
+    try:
+        pydantic_core.to_json(value)
+        return value
+    except Exception:
+        if isinstance(value, pydantic_core.ArgsKwargs):
+            safe = {'args': list(value.args), 'kwargs': dict(value.kwargs or {})}
+            try:
+                pydantic_core.to_json(safe)
+                return safe
+            except Exception:
+                return repr(value)
+        return repr(value)
+
 hooks = Hooks()
 
 @hooks.on.after_model_request
@@ -81,6 +96,16 @@ async def send_text_updates(ctx: RunContext[Deps], *, request_context, response)
                 await ctx.deps.message.channel.send(part.content)
 
     return response
+
+@hooks.on.before_model_request
+async def sanitize_retry_inputs(ctx: RunContext[Deps], request_context):
+    for msg in request_context.messages:
+        for part in getattr(msg, 'parts', ()):
+            if isinstance(part, RetryPromptPart) and isinstance(part.content, list):
+                for err in part.content:
+                    if isinstance(err, dict) and 'input' in err:
+                        err['input'] = json_safe_input(err['input'])
+    return request_context
 
 agent = Agent(
     deps_type = Deps,
