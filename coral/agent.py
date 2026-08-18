@@ -24,6 +24,7 @@ from enum import Enum
 import httpx
 import logging
 import json
+import re
 
 from .utils import indent
 from . import config as libcfg, prompts, reminders, moderation
@@ -395,7 +396,8 @@ async def run_code(ctx: RunContext[Deps], code: str, timeout: int = 10):
     
     warnings = []
 
-    if not code.strip().startswith('async def main(message, discord, client):') or not 'async def main(message, discord, client):' in code:
+    has_main = re.search(r'(?m)^async def main\(message, discord, client\):', code)
+    if not has_main:
         warnings.append("Your code didn't start with `async def main(message, discord, client):`. So the system added it for you and indented your code appropriately. If you don't receive any output / receive None, it's because you didn't have a `return` statement. You should try again and format the code properly within the function and return properly.")
 
         code = f"""
@@ -403,8 +405,7 @@ async def main(message, discord, client):
 {indent(code, 4)}
         """
 
-    locals  = {}
-    globals = { '__builtins__': __builtins__ }
+    ns = { '__builtins__': __builtins__ }
 
     stdout_buffer = StringIO()
     stderr_buffer = StringIO()
@@ -417,7 +418,7 @@ async def main(message, discord, client):
     stderr = ''
     try:
         with redirect_stdout(stdout_buffer), redirect_stderr(stderr_buffer):
-            exec(code, globals, locals)
+            exec(code, ns)
             func = locals['main']
 
             result = await asyncio.wait_for(
