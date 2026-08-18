@@ -412,7 +412,7 @@ async def run_code(ctx: RunContext[Deps], code: str, timeout: int = 10):
     If you need a 3rd party package, you can use `run_shell` to install it before running the code. For this, set the timeout to something higher e.g. 120.
     """
     
-    return await utils.run_code(code, "async def main(message, discord, client):", ctx.deps.message, discord, ctx.deps.client)
+    return await utils.run_code(code, "async def main(message, discord, client):", (ctx.deps.message, discord, ctx.deps.client), timeout)
     
 class FileType(str, Enum):
     IMAGE = 'image'
