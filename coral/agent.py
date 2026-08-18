@@ -21,6 +21,7 @@ from io import StringIO
 from pathlib import Path
 import subprocess as sp
 from enum import Enum
+import mimetypes
 import httpx
 import logging
 import json
@@ -69,20 +70,6 @@ async def block_unauthorized(ctx: RunContext[Deps], call: ToolCallInfo) -> Guard
         return GuardrailResult.block(f"Tool unavailable: {reason}")
     return GuardrailResult.allow()
 
-def json_safe_input(value):
-    try:
-        pydantic_core.to_json(value)
-        return value
-    except Exception:
-        if isinstance(value, pydantic_core.ArgsKwargs):
-            safe = {'args': list(value.args), 'kwargs': dict(value.kwargs or {})}
-            try:
-                pydantic_core.to_json(safe)
-                return safe
-            except Exception:
-                return repr(value)
-        return repr(value)
-
 hooks = Hooks()
 
 @hooks.on.after_model_request
@@ -97,16 +84,6 @@ async def send_text_updates(ctx: RunContext[Deps], *, request_context, response)
                 await ctx.deps.message.channel.send(part.content)
 
     return response
-
-@hooks.on.before_model_request
-async def sanitize_retry_inputs(ctx: RunContext[Deps], request_context):
-    for msg in request_context.messages:
-        for part in getattr(msg, 'parts', ()):
-            if isinstance(part, RetryPromptPart) and isinstance(part.content, list):
-                for err in part.content:
-                    if isinstance(err, dict) and 'input' in err:
-                        err['input'] = json_safe_input(err['input'])
-    return request_context
 
 agent = Agent(
     deps_type = Deps,
@@ -519,7 +496,11 @@ async def analyse_file(ctx: RunContext[Deps], url: str, file_type: FileType, que
     else:
         url = url.removeprefix('file://')
         path = Path(url)
-        part = pydantic_ai.TextContent(path.read_text()) if path.suffix in ('.txt', '.md') else pydantic_ai.BinaryContent(path.read_bytes())
+        if path.suffix in ('.txt', '.md', '.html'):
+            part = pydantic_ai.TextContent(path.read_text())
+        else:
+            mtype = mimetypes.guess_type(str(path))[0] or 'application/octet-stream'
+            part = pydantic_ai.BinaryContent(data=path.read_bytes(), media_type=media_type)
 
     try:
         response = await agent.run(
