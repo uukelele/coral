@@ -573,7 +573,7 @@ async def set_automation(
 
     if action not in ('prompt', 'code'): return "Action must be 'prompt' or 'code'."
 
-    triggers = [t for t in (at, every_x_seconds, cron, event) if t is not None]
+    triggers = [t for t in (at, every_x_seconds, cron, event) if t]
     if len(triggers) != 1: return "You have to provide exactly **ONE** trigger: `at`, `every_x_seconds`, `cron`, `event`."
 
     author_id = ctx.deps.author_id or (ctx.deps.message.author.id if ctx.deps.message else None)

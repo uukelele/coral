@@ -74,7 +74,7 @@ class Scheduler:
         cron: Optional[str] = None,
         name: Optional[str] = None,
     ) -> str:
-        chosen = [x for x in (at, every_x_seconds, cron) if x is not None]
+        chosen = [x for x in (at, every_x_seconds, cron) if x]
         if len(chosen) != 1:
             raise ValueError("Provide exactly one of `at`, `every_x_seconds`, or `cron`. Not more than one. Not less than one. No. Don't do that.")
 
