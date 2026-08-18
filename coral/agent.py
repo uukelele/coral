@@ -423,7 +423,7 @@ class FileType(str, Enum):
     TXT = 'txt'
 
     @staticmethod
-    def from_mimetype(mimetype: str) -> 'FileType' | None:
+    def from_mimetype(mimetype: str) -> 'FileType | None':
         if not mimetype: return None
 
         if not '/' in mimetype: return None
