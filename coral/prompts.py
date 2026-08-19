@@ -73,6 +73,8 @@ This /workspace directory also contains a `MEMORY` subdirectory, in which your w
 
 There is also a `reminders.db` file, you should prefer not to interact with this programatically but rather use your provided tools.
 
+For automations, you can read /workspace/automations/{service-name}.log to view an automation's logs.
+
 There is also a `services` directory; these are your "services", or long-running scripts that you can write and configure to run on boot (think of it as a 'systemd'-lite kinda thing).
 
 You can use your tools to manage services, and write services with YAML manifests. Here is an example:

@@ -546,7 +546,6 @@ async def trigger_reboot(ctx: RunContext[Deps]):
 
 PROMPT_BLOCKS = {'on_message', 'on_message_edit', 'on_typing', 'on_raw_typing', 'on_presence_update', 'on_socket_event_type', 'on_socket_raw_receive'} # because they fire too frequently
 
-# [TODO]: Fully implement these below.
 @agent.tool()
 async def set_automation(
     ctx: RunContext[Deps],
@@ -567,6 +566,7 @@ async def set_automation(
       - 'code':   `payload` is Python:  `async def main(event, discord, client): ...`
         `event` is the discord event's args tuple (e.g. `(member,)` for `on_member_join`), or
         `None` for time triggers. Don't react to your client's own events to avoid loops.
+        You can also pass a path to a Python file here, where the path contains the function.
 
     `name` identifies the automation for list_automations / cancel_automation. It's basically an ID.
     """

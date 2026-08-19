@@ -170,7 +170,7 @@ class CoralBot(discord.Client):
     def dispatch(self, event, /, *args, **kwargs):
         super().dispatch(event, *args, **kwargs)
         for auto in self.ev_automations.get(event, []):
-            self.loop.create_task(reminders.fire_automation(self, auto['action'], auto['payload'], auto['channel_id'], auto['author_id'], auto['guild_id'], event_args=args))
+            self.loop.create_task(reminders.fire_automation(auto['name'], self, auto['action'], auto['payload'], auto['channel_id'], auto['author_id'], auto['guild_id'], event_args=args))
 
     def register_event_automation(self, row: dict) -> bool:
         if any(a['name'] == row['name'] for autos in self.ev_automations.values() for a in autos): return False

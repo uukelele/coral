@@ -10,6 +10,7 @@ from datetime import datetime
 import logging, typing
 from typing import Optional, Literal
 import discord
+from pathlib import Path
 
 from . import moderation, utils
 
@@ -22,7 +23,7 @@ REMINDERS_DB = 'sqlite:////workspace/reminders.db'
 
 _bot: 'CoralBot' = None
 
-async def fire_automation(bot: 'CoralBot', action: Literal['code', 'prompt'], payload: str, channel_id: Optional[int], author_id: int, guild_id: Optional[int], event_args: tuple):
+async def fire_automation(name: str, bot: 'CoralBot', action: Literal['code', 'prompt'], payload: str, channel_id: Optional[int], author_id: int, guild_id: Optional[int], event_args: tuple):
     if moderation.is_blocked(bot.engine, author_id)[0]: return
 
     channel = bot.get_channel(channel_id) if channel_id else None
@@ -43,16 +44,28 @@ async def fire_automation(bot: 'CoralBot', action: Literal['code', 'prompt'], pa
                 tier = tier, author = member, message = None, footer = False,
             )
         case 'code':
+            code = payload
+            try:
+                p = Path(payload)
+                if p.is_file(): code = p.read_text()
+            except OSError: ...
+
             res = await utils.run_code(
-                payload,
+                code,
                 'async def main(event, discord, client):', (event_args, discord, bot),
                 timeout = 60,
             )
             if res.get('stderr') or (isinstance(res.get('result'), str) and 'Traceback' in res['result']):
-                logger.warning("Automation code error: %s\n%s", res.get('result'), res.get('stderr'))
+                logger.warning("Automation %s code error: %s\n%s", name, res.get('result'), res.get('stderr'))
 
-async def _fire(action: Literal['code', 'prompt'], payload: str, channel_id: int, author_id: int, guild_id: int):
-    if _bot: await fire_automation(_bot, action, payload, channel_id, author_id, guild_id, event_args=None)
+            log = Path(f'/workspace/automations/{name}.log')
+            try:
+                log.parent.mkdir(parents=True, exist_ok=True)
+                with log.open('a') as lf: lf.write(f"Automation running at {utils.now()}: {res}\n")
+            except OSError: ... 
+
+async def _fire(name: str, action: Literal['code', 'prompt'], payload: str, channel_id: int, author_id: int, guild_id: int):
+    if _bot: await fire_automation(name, _bot, action, payload, channel_id, author_id, guild_id, event_args=None)
 
 class Scheduler:
     def __init__(self, bot, db_url: str = REMINDERS_DB):
@@ -86,7 +99,7 @@ class Scheduler:
             trigger = CronTrigger.from_crontab(cron)
 
         job = self.scheduler.add_job(
-            _fire, args = [ action, payload, channel_id, author_id, guild_id ], id=name,
+            _fire, args = [ name, action, payload, channel_id, author_id, guild_id ], id=name,
             trigger=trigger, misfire_grace_time=3600, coalesce=True,
         )
         return job.id
@@ -104,11 +117,11 @@ class Scheduler:
             {
                 'id': j.id,
                 'next_run': str(j.next_run_time),
-                'action': j.args[0],
-                'payload': j.args[1],
-                'channel_id': j.args[2],
-                'author_id': j.args[3],
-                'guild_id': j.args[4],
+                'action': j.args[1],
+                'payload': j.args[2],
+                'channel_id': j.args[3],
+                'author_id': j.args[4],
+                'guild_id': j.args[5],
             }
             for j in jobs
         ]
