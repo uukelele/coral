@@ -6,14 +6,14 @@ import yaml, logging, re
 logger = logging.getLogger(__name__)
 
 TOOL_GROUPS = {
-    'web':            ['duckduckgo_search', 'web_fetch'],
+    'web':            ['duckduckgo_search', 'web_fetch', 'native_web_search', 'native_web_fetch'],
     'media':          ['analyse_file'],
     'discord':        ['get_user_info', 'conversation_catchup'],
     'discord:admin':  ['search_discord', 'write_memory', 'delete_memory'], # this is in the `discord:admin` group as search_discord can access even hidden/private/admin channels which we don't always want to expose
     'planning':       ['write_plan', 'read_plan', 'add_task', 'update_task_status', 'update_task_statuses', 'remove_task', 'add_subtask', 'set_dependency', 'get_available_tasks', 'delegate_task'],
     'coder':          [
-                        'read_file', 'write_file', 'edit_file', 'list_directory', 'search_files', 'find_files', 'create_directory', 'file_info', 'attach_file', # filesystem # attach file is here as it provides arbitrary file read (constrained to /workspace, but still file read of sensitive e.g. config.yaml)
-                        'run_command', 'start_command', 'check_command', 'stop_command', 'run_shell', 'run_code', 'trigger_reboot', # code execution
+                        'read_file', 'write_file', 'edit_file', 'list_files', 'grep', 'attach_file', # filesystem # attach file is here as it provides arbitrary file read (constrained to /workspace, but still file read of sensitive e.g. config.yaml)
+                        'shell', 'run_shell', 'run_code', 'trigger_reboot', # code execution
                         'create_service', 'list_services', 'service_status', 'stop_service', 'restart_service', 'remove_service', # services
                         'author_capability', 'list_authored_capabilities', 'disable_authored_capability', 'read_pyai_docs', # capability writing
                         'set_automation', 'cancel_automation', 'list_automations', # automations

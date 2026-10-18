@@ -87,5 +87,5 @@ def setup(verbose: bool = True):
     term_handler.setLevel(logging.DEBUG if verbose else logging.INFO)
     logger.addHandler(term_handler)
 
-    for name in ("openai", "httpcore"): # ignore these guys
+    for name in ("openai", "anthropic", "httpcore", "h2", "httpx", "httpx2", "hickory_net", "hickory_resolver", "cookie_store"): # ignore these guys
         logging.getLogger(name).setLevel(logging.CRITICAL + 1)

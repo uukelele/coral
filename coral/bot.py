@@ -30,7 +30,7 @@ class CoralBot(discord.Client):
 
         logger.info("Agent %s initializing...", str(model))
 
-        logger.debug(str(config))
+        logger.debug(str(config.model_dump(exclude={'DISCORD_TOKEN', 'AI_API_KEY'})))
         logger.debug(str(agent))
         logger.debug(str(model))
 

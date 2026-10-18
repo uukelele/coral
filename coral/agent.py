@@ -1,7 +1,9 @@
 import pydantic_ai
 import pydantic_core
 from pydantic_ai import Agent, RunContext
-from pydantic_ai.capabilities import PrepareTools, Thinking, WebSearch, WebFetch, Hooks
+from pydantic_ai.capabilities import PrepareTools, Thinking, WebSearch, WebFetch, Hooks, LocalWorkspace, NativeTool
+from pydantic_ai.native_tools import WebSearchTool, WebFetchTool
+from pydantic_ai.workspaces import LocalWorkspaceBackend
 from pydantic_ai_harness import Coder, Memory, ToolGuardrail, GuardrailResult, TieredCompaction, ClearToolResults, SummarizingCompaction, ClampOversizedMessages, ReportContextUsage, DeduplicateFileReads, PromptInjectionDefender, CapabilityCreation, PydanticAIDocs
 from pydantic_ai_harness.guardrails import ToolCallInfo
 from pydantic_ai_harness.memory import FileStore
@@ -10,6 +12,8 @@ from pydantic_ai_harness.compaction import ContextUsageEvent
 from pydantic_ai_harness.capability_creation._capability import _DEFAULT_GUIDANCE
 from pydantic_ai.tools import ToolDefinition
 from pydantic_ai.models import Model
+from pydantic_ai.models.test import TestModel
+from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError
 from pydantic_ai.messages import TextPart, ToolCallPart, RetryPromptPart
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -134,6 +138,21 @@ async def send_text_updates(ctx: RunContext[Deps], *, request_context, response)
 
     return response
 
+@hooks.on.tool_execute_error
+async def tool_error_to_result(ctx: RunContext[Deps], *, call: ToolCallPart, tool_def: ToolDefinition, args, error: Exception):
+    logger.warning("Tool %s raised %s: %s", call.tool_name, type(error).__name__, error, exc_info=error)
+    return f"Tool `{call.tool_name}` failed with {type(error).__name__}: {error}\n\nTry a different approach, or use different arguments."
+
+def _native_tool(tool_cls: type[WebSearchTool] | type[WebFetchTool], permission: str) -> NativeTool[Deps]:
+    def build(ctx: RunContext[Deps]):
+        if isinstance(ctx.model, TestModel): return None # TestModel raises errors when native tools are given to it
+        if tool_cls is WebSearchTool and isinstance(ctx.model, OpenAIChatModel) and not ctx.model.profile.get('openai_chat_supports_web_search', False):
+            return None # /chat/completions raises error instead of silently ignoring , even when marked as optional
+        tier = ctx.deps.tier
+        if tier is not None and not tier.can_use_tool(permission): return None
+        return tool_cls(optional=True) # optional, so models that can't use it, don't.
+    return NativeTool(build)
+
 def _fk(call: ToolCallPart) -> str | None:
     if call.tool_name != 'read_file':
         return None
@@ -153,7 +172,8 @@ creation = CapabilityCreation(directory=Path('/workspace/capabilities'), guidanc
 
 def _memory_namespace(ctx: RunContext[Deps]) -> str: return str(ctx.deps.guild_id) if ctx.deps.guild_id else (str(ctx.deps.message.guild.id) if (ctx.deps.message and ctx.deps.message.guild) else 'global')
 
-memory_store = FileStore('/workspace/MEMORY')
+Path('/workspace/MEMORY').mkdir(parents=True, exist_ok=True) # LocalWorkspaceBackend never creates its own directory
+memory_store = FileStore('.', workspace=LocalWorkspaceBackend('/workspace/MEMORY'))
 
 agent = Agent(
     deps_type = Deps,
@@ -174,11 +194,14 @@ agent = Agent(
             on_detection = log_injection,
         ),
         Thinking(),
-        WebSearch(local='duckduckgo'),
-        WebFetch(local=True),
+        WebSearch(native=False, local='duckduckgo'),
+        _native_tool(WebSearchTool, 'native_web_search'),
+        WebFetch(native=False, local=True),
+        _native_tool(WebFetchTool, 'native_web_fetch'),
         PydanticAIDocs(),
         creation,
-        Coder(workspace='/workspace', allowed_commands=[]),
+        LocalWorkspace('/workspace'), # CapabilityCreation requires a writable local workspace
+        Coder(unrestricted_filesystem=True),
         Memory(
             memory_store,
             namespace = _memory_namespace,
@@ -222,6 +245,7 @@ _GUILD_CTX_CACHE: dict[int, tuple[float, str]] = {} # guild_id -> (time, context
 _GUILD_CTX_TTL = 60.0 # cache bust after 60 secs
 _MAX_EMOJIS = 200
 _MAX_ROLES = 200
+_MAX_CHANNELS = 200
 
 def _guild_static_context(guild: discord.Guild) -> str:
     hit = _GUILD_CTX_CACHE.get(guild.id)
@@ -246,6 +270,29 @@ def _guild_static_context(guild: discord.Guild) -> str:
         for r in roles:
             lines.append(f"- {r.name} ({len(r.members)} members) -> `<@&{r.id}>`")
         lines.append('')
+
+    chnls = []
+    count = 0
+    for category, channels in guild.by_category():
+        if category is not None:
+            chnls.append(f"- **{category.name}**")
+            indent = "  - "
+        else:
+            indent = "- "
+        for c in channels:
+            if count >= _MAX_CHANNELS: break
+            kind = type(c).__name__.replace('Channel', '').lower() # 'text' | 'voice' | 'forum' | 'stage' | ...
+            chnls.append(f"{indent}#{c.name} (<#{c.id}>) [{kind}]" + ('' if c.permissions_for(guild.me).view_channel else ' [hidden]'))
+            count += 1
+        if count >= _MAX_CHANNELS: break
+
+    if chnls:
+        lines.append("### Channels")
+        lines += chnls
+        if count >= _MAX_CHANNELS:
+            lines.append("- ...and some more (omitted)")
+        lines.append('')
+    
 
     text = '\n'.join(lines)
     _GUILD_CTX_CACHE[guild.id] = (time.monotonic(), text)
@@ -506,7 +553,7 @@ async def run_shell(ctx: RunContext[Deps], command: str, timeout: int = 10) -> s
 
     Use this to install Python packages, navigate the filesystem, or download files.
 
-    Prefer using the `run_command` tool over this, but you can use this as a fallback if the `run_command` tool decides to restrict your command for whatever reason.
+    Prefer using the `shell` tool over this, but you can use this as a fallback if the `shell` tool decides to restrict your command for whatever reason.
     """
     logger.debug("Agent attempted shell command: %s", command)
 
@@ -661,20 +708,27 @@ async def analyse_file(ctx: RunContext[Deps], url: str, file_type: FileType, que
     else:
         url = url.removeprefix('file://')
         path = Path(url)
-        if path.suffix in ('.txt', '.md', '.html'):
-            part = pydantic_ai.TextContent(path.read_text())
-        else:
-            mtype = mimetypes.guess_type(str(path))[0] or 'application/octet-stream'
-            part = pydantic_ai.BinaryContent(data=path.read_bytes(), media_type=mtype)
+        try:
+            if path.suffix in ('.txt', '.md', '.html'):
+                part = pydantic_ai.TextContent(path.read_text())
+            else:
+                mtype = mimetypes.guess_type(str(path))[0] or 'application/octet-stream'
+                part = pydantic_ai.BinaryContent(data=path.read_bytes(), media_type=mtype)
+        except OSError as e: return f"Failed to read {url}: {e}"
 
     try:
-        response = await agent.run(
+        summarizer = Agent(
+            model=ctx.deps.model,
+            name='FileAnalysis',
+            capabilities=[PromptInjectionDefender(block_high_risk=True)]
+        )
+
+        response = await summarizer.run(
             user_prompt = [
                 part,
                 prompts.CONTENT_SUMMARIZATION_PROMPT.render(query=query),
             ],
             model = ctx.deps.model,
-            deps = Deps(is_message=False, model=ctx.deps.model),
         )
         logger.debug("Summarized content: %s", response.output)
         return response.output
