@@ -102,7 +102,7 @@ def sanitize_role_mentions(text: str, guild, channel, member, allow_everyone: bo
     except Exception:
         can_mention_any = False
 
-    allowed_roles = []
+    allowed_roles = {}
 
     def repl(match):
         rid = int(match.group(1))
@@ -116,11 +116,11 @@ def sanitize_role_mentions(text: str, guild, channel, member, allow_everyone: bo
             return 'everyone'
 
         if role.mentionable or can_mention_any:
-            allowed_roles.append(role)
+            allowed_roles[rid] = role
             return match.group(0)
         return '@' + role.name
 
-    return _ROLE_MENTION_RE.sub(repl, text), allowed_roles
+    return _ROLE_MENTION_RE.sub(repl, text), list(allowed_roles.values())
 
 
 def indent(text, spaces):
